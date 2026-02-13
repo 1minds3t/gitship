@@ -124,4 +124,4 @@ Created by [1minds3t](https://github.com/1minds3t)
 
 ---
 
-**Note**: `gitship` is designed for local development workflows. Always review changes before pushing to shared/production branches.
+**Note**: `gitship` is designed for local development workflows. Always review changes before pushing to shared/production branches.# gitship
