@@ -271,19 +271,27 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Prompt for title if missing or user wants to change
-    print(f"\n{Colors.CYAN}Release Title:{Colors.RESET}")
+    # Prompt for title with CLEAR prefix/suffix separation
+    print(f"\n{Colors.BOLD}Release Title:{Colors.RESET}")
+    print(f"{Colors.DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}")
     
-    prefix = f"{pkg_name} v{new_ver} - " if pkg_name else ""
+    # Build prefix (what's automatic)
+    prefix = f"{pkg_name} {new_ver}" if pkg_name else new_ver
     
-    print(f"Format will be: {Colors.DIM}{prefix}{Colors.RESET}{Colors.GREEN}[Title]{Colors.RESET}")
-    print(f"Suggested Title: {Colors.GREEN}{suggested_title}{Colors.RESET}")
+    # Show what's automatic vs what user adds
+    print(f"\n{Colors.CYAN}Auto prefix:{Colors.RESET} {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET}")
+    print(f"{Colors.CYAN}Your suffix:{Colors.RESET} {Colors.GREEN}{suggested_title}{Colors.RESET} {Colors.DIM}(suggested){Colors.RESET}")
+    print(f"\n{Colors.BOLD}Full title will be:{Colors.RESET}")
+    print(f"  {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET} - {Colors.GREEN}[YOUR SUFFIX HERE]{Colors.RESET}")
     
-    user_input = input(f"Enter Title (press Enter to use suggested): ").strip()
+    print(f"\n{Colors.YELLOW}Type your suffix to append after '{prefix} -'{Colors.RESET}")
+    print(f"{Colors.DIM}Press Enter to use: {suggested_title}{Colors.RESET}")
+    
+    user_input = input(f"\n{Colors.BRIGHT_BLUE}Suffix:{Colors.RESET} ").strip()
     
     final_suffix = user_input if user_input else suggested_title
     if not final_suffix:
-        final_suffix = "Maintenance release"
+        final_suffix = "Release"
         
     # The changelog file itself usually just has the suffix as the top line description
     # or we can put the full thing. Let's stick to the suffix for the markdown body.
@@ -1288,7 +1296,10 @@ def _main_logic(repo_path: Path):
                     if not notes:
                         print("   ! No changelog found. Opening editor...")
                         # FIX: Provide default title and unpack tuple
-                        notes, user_title = edit_notes(current_ver, "", f"Release {current_ver}")
+                        # Smart default based on version
+                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
+                        default_suffix = "Initial Release" if is_first_release else "Release"
+                        notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                     else:
                         # If notes existed, we still need a title. Default to generic if not extracted.
                         user_title = f"Release {current_ver}"
@@ -1376,7 +1387,10 @@ def _main_logic(repo_path: Path):
                     print("   ! Changelog entry empty or not found.")
                     if input("   Open editor to write manually? (y/n): ").lower() == 'y':
                         # FIX: Provide default title to fix TypeError
-                        notes, _ = edit_notes(current_ver, "", f"Release {current_ver}")
+                        # Smart default based on version
+                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
+                        default_suffix = "Initial Release" if is_first_release else "Release"
+                        notes, _ = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                     else:
                         return
                 else:
@@ -1503,7 +1517,10 @@ def _main_logic(repo_path: Path):
     
     # Changelog
     draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
-    final_notes, release_title = edit_notes(new_ver, draft, suggested_title)
+    # Smart suffix for first release
+    is_first_release = new_ver.startswith('0.') or new_ver == '1.0.0'
+    smart_suffix = "Initial Release" if is_first_release else suggested_title
+    final_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
     write_changelog(repo_path, final_notes, new_ver)
     
     # Finish
