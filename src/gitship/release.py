@@ -335,7 +335,9 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
         
         # Extract the title line (first non-empty line after header)
         # This is a bit heuristic but works for the GH release title
-        release_title_clean = final_title
+        # Build full title from prefix + suffix
+        prefix = f"{pkg_name} {new_ver}" if pkg_name else new_ver
+        release_title_clean = f"{prefix} - {final_suffix}"
         for line in result_lines:
             if line.strip() and not line.startswith("## ["):
                 release_title_clean = line.strip()
