@@ -1336,13 +1336,34 @@ def _main_logic(repo_path: Path):
                 if shutil.which("gh"):
                     print(f"\n📝 Creating GitHub release...")
                     notes = extract_changelog_section(repo_path, current_ver)
+                    
+                    if not notes:
+                        print("   ! No changelog found. Opening editor...")
+                        notes = edit_notes(current_ver, "")
+                    
                     if notes:
                         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
                             tf.write(notes)
                             notes_file = tf.name
-                        subprocess.run(["gh", "release", "create", tag, "-F", notes_file, "-t", tag, "--draft", "--target", "main"], cwd=repo_path)
-                        os.unlink(notes_file)
-                        print(f"✅ Release {tag} fixed and published!")
+                        
+                        try:
+                            result = subprocess.run(
+                                ["gh", "release", "create", tag, "-F", notes_file, "-t", tag, "--draft", "--target", "main"], 
+                                cwd=repo_path,
+                                capture_output=False,  # Show output to user!
+                                check=True
+                            )
+                            print(f"✅ Release {tag} fixed and published!")
+                        except subprocess.CalledProcessError as e:
+                            print(f"❌ Failed to create release: {e}")
+                        finally:
+                            if os.path.exists(notes_file):
+                                os.unlink(notes_file)
+                    else:
+                        print("   Skipped release creation (no notes)")
+                else:
+                    print("   ⚠️  GitHub CLI not found, skipping release creation")
+                
                 return
             
             elif choice == '2':
