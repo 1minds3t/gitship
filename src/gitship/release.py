@@ -1271,7 +1271,7 @@ def _main_logic(repo_path: Path):
                 print(f"  ✓ Deleted local tag")
                 
                 # Step 4: Commit changes (excluding translations)
-                print(f"\n📝 Step 4/5: Committing code changes...")
+                print(f"\n📝 Step 4/6: Committing code changes...")
                 
                 # Ensure publish.yml is included if it was just created/staged
                 if (repo_path / ".github" / "workflows" / "publish.yml").exists():
@@ -1280,15 +1280,16 @@ def _main_logic(repo_path: Path):
                 for f in code_changes:
                     run_git(["add", f], cwd=repo_path)
                 
-                run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
-                print(f"  ✓ Committed {len(code_changes)} files")
+                # Only commit if there are changes
+                status = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+                if status.strip():
+                    run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
+                    print(f"  ✓ Committed {len(code_changes)} files")
+                else:
+                    print(f"  ✓ No changes to commit")
                 
-                # Step 4: Commit changes (excluding translations)
-                print(f"\n📝 Step 4/6: Committing code changes...")
-                for f in code_changes:
-                    run_git(["add", f], cwd=repo_path)
-                run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
-                print(f"  ✓ Committed {len(code_changes)} files")
+                # Step 5: Update CHANGELOG (will happen when user writes notes)
+                print(f"\n📝 Step 5/6: CHANGELOG will be updated after writing release notes")
                 
                 # Step 5: Update CHANGELOG (do this BEFORE tagging!)
                 print(f"\n📝 Step 5/6: Updating CHANGELOG.md...")

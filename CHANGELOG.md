@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-14
+
+('**Features:**\n- feat: complete v0.2.0 release with all code changes\n\n**Configuration Updates:**\n- Update 1 code files\n- Update 5 code files; tests; documentation\n\n**Other Changes:**\n- Reset version to 0.2.0\n- Rename: checkgit→check, fixgit→fix; Update 9 code files; Update tests; Update documentation; Update configuration\n- test: add test file\n- docs: update README\n- Initial commit: gitship v0.1.0\n\n_1 file changed, 10 insertions(+), 9 deletions(-)_\n', 'complete v0.2.0 release with all code changes')
+
 ## [Unreleased]
 
 ### Planned
