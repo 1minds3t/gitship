@@ -1283,12 +1283,41 @@ def _main_logic(repo_path: Path):
                 run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
                 print(f"  ✓ Committed {len(code_changes)} files")
                 
-                # Step 5: Recreate and push
-                print(f"\n🚀 Step 5/5: Recreating {tag}...")
+                # Step 4: Commit changes (excluding translations)
+                print(f"\n📝 Step 4/6: Committing code changes...")
+                for f in code_changes:
+                    run_git(["add", f], cwd=repo_path)
+                run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
+                print(f"  ✓ Committed {len(code_changes)} files")
+                
+                # Step 5: Update CHANGELOG (do this BEFORE tagging!)
+                print(f"\n📝 Step 5/6: Updating CHANGELOG.md...")
+                
+                # Get notes from user (they already wrote them above)
+                # We need to get them again to put in changelog
+                notes_for_changelog = extract_changelog_section(repo_path, current_ver)
+                
+                if not notes_for_changelog:
+                    # User will write notes next, so we'll update changelog then
+                    print("  ! Will update changelog after getting release notes")
+                else:
+                    # Update changelog now
+                    write_changelog(repo_path, notes_for_changelog, current_ver)
+                    run_git(["add", "CHANGELOG.md"], cwd=repo_path)
+                    run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
+                    print(f"  ✓ CHANGELOG.md updated and committed")
+                
+                # Step 6: Recreate and push
+                print(f"\n🚀 Step 6/6: Recreating {tag}...")
                 run_git(["push", "origin", "main"], cwd=repo_path)
                 run_git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=repo_path)
                 run_git(["push", "origin", tag], cwd=repo_path)
                 print(f"  ✓ Tag {tag} recreated and pushed")
+                
+                # Give GitHub API time to process the tag
+                import time
+                print("  ⏳ Waiting for GitHub to process tag...")
+                time.sleep(3)
                 
                 # Create GH release
                 if shutil.which("gh"):
@@ -1298,10 +1327,18 @@ def _main_logic(repo_path: Path):
                     if not notes:
                         print("   ! No changelog found. Opening editor...")
                         # FIX: Provide default title and unpack tuple
-                        # Smart default based on version
                         is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
                         default_suffix = "Initial Release" if is_first_release else "Release"
                         notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
+                        
+                        # NOW update changelog with the notes user just wrote
+                        if notes:
+                            print("\n📝 Updating CHANGELOG.md with release notes...")
+                            write_changelog(repo_path, notes, current_ver)
+                            run_git(["add", "CHANGELOG.md"], cwd=repo_path)
+                            run_git(["commit", "--amend", "--no-edit"], cwd=repo_path)  # Amend previous commit
+                            run_git(["push", "--force-with-lease"], cwd=repo_path)  # Force push (safe)
+                            print("  ✓ CHANGELOG.md updated")
                     else:
                         # If notes existed, we still need a title. Default to generic if not extracted.
                         user_title = f"Release {current_ver}"
