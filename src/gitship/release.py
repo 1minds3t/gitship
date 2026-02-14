@@ -1191,8 +1191,9 @@ def _main_logic(repo_path: Path):
         print(f"  1. RESUME:  Commit, Tag & Push {current_ver} (Use current changelog)")
         print(f"  2. REFRESH: Regenerate Changelog & Release {current_ver} (If you added more commits)")
         print(f"  3. ABORT:   Revert TOML to {last_ver} and exit")
+        print(f"  4. RESET:   Reset version to match latest tag")
         
-        choice = input("\nChoice (1-3): ").strip()
+        choice = input("\nChoice (1-4): ").strip()
         
         if choice == '1':
             perform_git_release(repo_path, current_ver)
@@ -1233,6 +1234,11 @@ def _main_logic(repo_path: Path):
             toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{last_ver}"', content, count=1, flags=re.MULTILINE))
             print("Done. Exiting.")
             return
+            
+        elif choice == '4':
+            reset_version_to_tag(repo_path)
+            return
+            
         else:
             print("Invalid choice.")
             return
