@@ -1280,7 +1280,8 @@ def _main_logic(repo_path: Path):
                     
                     if not notes:
                         print("   ! No changelog found. Opening editor...")
-                        notes = edit_notes(current_ver, "")
+                        # FIX: Provide default title and unpack the tuple return
+                        notes, _ = edit_notes(current_ver, "", f"Release {current_ver}")
                     
                     if notes:
                         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
