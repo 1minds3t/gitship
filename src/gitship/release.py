@@ -1280,17 +1280,25 @@ def _main_logic(repo_path: Path):
                     
                     if not notes:
                         print("   ! No changelog found. Opening editor...")
-                        # FIX: Provide default title and unpack the tuple return
-                        notes, _ = edit_notes(current_ver, "", f"Release {current_ver}")
-                    
+                        # FIX: Provide default title and unpack tuple
+                        notes, user_title = edit_notes(current_ver, "", f"Release {current_ver}")
+                    else:
+                        # If notes existed, we still need a title. Default to generic if not extracted.
+                        user_title = f"Release {current_ver}"
+
                     if notes:
                         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
                             tf.write(notes)
                             notes_file = tf.name
                         
                         try:
+                            # FIX: Enforce "Package vVersion - Title" format
+                            from . import pypi
+                            pkg_name = pypi.read_package_name(repo_path) or repo_path.name
+                            final_gh_title = f"{pkg_name} {tag} - {user_title}"
+                            
                             result = subprocess.run(
-                                ["gh", "release", "create", tag, "-F", notes_file, "-t", tag, "--draft", "--target", "main"], 
+                                ["gh", "release", "create", tag, "-F", notes_file, "-t", final_gh_title, "--draft", "--target", "main"], 
                                 cwd=repo_path,
                                 capture_output=False,  # Show output to user!
                                 check=True
