@@ -140,9 +140,10 @@ def extract_changelog_section(repo_path: Path, version: str) -> str:
         return match.group(1).strip()
     return ""
 
-def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> str:
+def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tuple[str, str]:
     """
     Generate changelog with proper title, grouped commits, and duplicate counting.
+    Returns (draft_content, suggested_title)
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
     
@@ -189,51 +190,14 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> str
     # Build the changelog
     lines = []
     
-    # Add placeholder for title (user will replace this)
-    lines.append("Implements comprehensive daemon management and i18n improvements:")
-    lines.append("")
-    lines.append("<!-- TODO: Replace above with a catchy title like: -->")
-    lines.append(f"<!-- v{new_version} — Surgical Knowledge Base, Build Resilience & Global Infrastructure -->")
-    lines.append("")
-    
-    # Add main description sections
-    lines.append("**Daemon & Worker Management:**")
-    lines.append("- Add 'daemon idle' command for Python version-specific worker pool config")
-    lines.append("- Group idle workers by Python version in resource monitor")
-    lines.append("- Add stale worker detection (>24h) with interactive cleanup")
-    lines.append("- Add daemon restart command (stop + start)")
-    lines.append("- Make Windows daemon opt-in (OMNIPKG_ENABLE_DAEMON_WINDOWS) with UTF-8/unbuffered I/O")
-    lines.append("- Remove implicit auto-start for explicit control")
-    lines.append("")
-    
-    lines.append("**Internationalization (i18n):**")
-    lines.append("- Complete Japanese translation (ja/LC_MESSAGES/omnipkg.po)")
-    lines.append("- Hoist i18n imports to global scope, fix UnboundLocalError")
-    lines.append("- Add OMNIPKG_LANG env var for language priority")
-    lines.append("- Propagate lang setting to all subprocesses and shims")
-    lines.append("- Replace print() with safe_print() for encoding safety")
-    lines.append("")
-    
-    lines.append("**Testing & CI:**")
-    lines.append("- Windows concurrency test workflow improvements")
-    lines.append("- Stress test CLI args for specific test selection")
-    lines.append("- Non-blocking daemon startup in concurrent tests")
-    lines.append("")
-    
-    # Add file stats
-    if stats:
-        lines.append(f"Files changed: {stats}")
-        lines.append("")
-    
     # Group and count commits
+    features = []
+    fixes = []
+    refactors = []
+    updates = {}  # Use dict to count duplicates
+    other = []
+    
     if commit_list:
-        # Group by type
-        features = []
-        fixes = []
-        refactors = []
-        updates = {}  # Use dict to count duplicates
-        other = []
-        
         for commit in commit_list:
             if commit.startswith("feat"):
                 features.append(commit)
@@ -242,130 +206,94 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> str
             elif commit.startswith("refactor"):
                 refactors.append(commit)
             elif commit.startswith("Update "):
-                # Extract the file/target being updated
-                # "Update windows-concurrency-test.yml" -> "windows-concurrency-test.yml"
                 target = commit.replace("Update ", "").strip()
                 updates[target] = updates.get(target, 0) + 1
             else:
                 other.append(commit)
-        
-        # Output grouped sections
-        if features:
-            lines.append("**Features:**")
-            for c in features:
-                lines.append(f"- {c}")
-            lines.append("")
-        
-        if fixes:
-            lines.append("**Fixes:**")
-            for c in fixes:
-                lines.append(f"- {c}")
-            lines.append("")
-        
-        if refactors:
-            lines.append("**Refactoring:**")
-            for c in refactors:
-                lines.append(f"- {c}")
-            lines.append("")
-        
-        if updates:
-            lines.append("**Configuration Updates:**")
-            # Sort by count (most frequent first)
-            sorted_updates = sorted(updates.items(), key=lambda x: x[1], reverse=True)
-            for target, count in sorted_updates:
-                if count > 1:
-                    lines.append(f"- Update {target} (x{count})")
-                else:
-                    lines.append(f"- Update {target}")
-            lines.append("")
-        
-        if other:
-            lines.append("**Other Changes:**")
-            for c in other:
-                lines.append(f"- {c}")
-            lines.append("")
     
-    lines.append("---")
+    # Generate a suggested title based on the most significant change
+    suggested_title = ""
+    if features:
+        suggested_title = features[0].split(":", 1)[-1].strip()
+    elif fixes:
+        suggested_title = fixes[0].split(":", 1)[-1].strip()
+    elif other:
+        suggested_title = other[0]
+    else:
+        suggested_title = "Maintenance release"
+
+    # Add main description sections
+    if features:
+        lines.append("**Features:**")
+        for c in features:
+            lines.append(f"- {c}")
+        lines.append("")
     
-    return "\n".join(lines)
+    if fixes:
+        lines.append("**Fixes:**")
+        for c in fixes:
+            lines.append(f"- {c}")
+        lines.append("")
+    
+    if refactors:
+        lines.append("**Refactoring:**")
+        for c in refactors:
+            lines.append(f"- {c}")
+        lines.append("")
+    
+    if updates:
+        lines.append("**Configuration Updates:**")
+        sorted_updates = sorted(updates.items(), key=lambda x: x[1], reverse=True)
+        for target, count in sorted_updates:
+            if count > 1:
+                lines.append(f"- Update {target} (x{count})")
+            else:
+                lines.append(f"- Update {target}")
+        lines.append("")
+    
+    if other:
+        lines.append("**Other Changes:**")
+        for c in other:
+            lines.append(f"- {c}")
+        lines.append("")
+        
+    # Add file stats
+    if stats:
+        lines.append(f"_{stats}_")
+        lines.append("")
+    
+    return "\n".join(lines), suggested_title
 
-# EXAMPLE OUTPUT:
-"""
-## [2.2.2] — 2026-02-13
-
-Implements comprehensive daemon management and i18n improvements:
-
-<!-- TODO: Replace above with a catchy title like: -->
-<!-- v2.2.2 — Surgical Knowledge Base, Build Resilience & Global Infrastructure -->
-
-**Daemon & Worker Management:**
-- Add 'daemon idle' command for Python version-specific worker pool config
-- Group idle workers by Python version in resource monitor
-- Add stale worker detection (>24h) with interactive cleanup
-- Add daemon restart command (stop + start)
-- Make Windows daemon opt-in (OMNIPKG_ENABLE_DAEMON_WINDOWS) with UTF-8/unbuffered I/O
-- Remove implicit auto-start for explicit control
-
-**Internationalization (i18n):**
-- Complete Japanese translation (ja/LC_MESSAGES/omnipkg.po)
-- Hoist i18n imports to global scope, fix UnboundLocalError
-- Add OMNIPKG_LANG env var for language priority
-- Propagate lang setting to all subprocesses and shims
-- Replace print() with safe_print() for encoding safety
-
-**Testing & CI:**
-- Windows concurrency test workflow improvements
-- Stress test CLI args for specific test selection
-- Non-blocking daemon startup in concurrent tests
-
-Files changed: 78 files changed, 9304 insertions(+), 6573 deletions(-)
-
-**Features:**
-- feat(i18n): Integrate and propagate i18n across core components
-
-**Fixes:**
-- fix(i18n): finalize Japanese translation
-- fix(cli): hoist i18n imports to global scope to prevent UnboundLocalError
-
-**Refactoring:**
-- refactor: remove undefined name from `__all__`
-- refactor: remove reimported module
-- refactor: remove unnecessary return statement
-
-**Configuration Updates:**
-- Update windows-concurrency-test.yml (x4)
-- Update README.md (x4)
-- Update publish.yml (x6)
-- Update conda_build.yml (x5)
-- Update meta-platforms.yaml (x2)
-- Update meta-noarch.yaml
-
-**Other Changes:**
-- restore: recover deleted changelog
-
----
-"""
-
-
-def edit_notes(new_ver: str, draft: str) -> str:
+def edit_notes(new_ver: str, draft: str, suggested_title: str) -> tuple[str, str]:
     """
     Open editor with the changelog draft.
-    Adds clear instructions and the version header.
+    Returns (final_notes, release_title)
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     
-    template = f"""## [{new_ver}] - {date_str}
+    # Prompt for title if missing or user wants to change
+    print(f"\n{Colors.CYAN}Release Title:{Colors.RESET}")
+    print(f"Suggested: {Colors.GREEN}{suggested_title}{Colors.RESET}")
+    user_title = input(f"Enter title (press Enter to use suggested): ").strip()
+    
+    final_title = user_title if user_title else suggested_title
+    if not final_title:
+        final_title = "Maintenance release"
+        
+    template = f"""## [{new_ver}] — {date_str}
+
+{final_title}
 
 {draft}
 
 # ------------------------------------------------------------------
 # INSTRUCTIONS:
-# 1. Replace the TODO section at top with actual description
-# 2. Review and edit the commit list
-# 3. Delete everything below the "CLEANUP MARKER" line
-# 4. Delete these instruction lines (starting with #)
-# 5. Save and exit
+# 1. The first line after the header is your Release Title.
+# 2. Review and edit the commit list below.
+# 3. Delete everything below the "CLEANUP MARKER" line.
+# 4. Save and exit.
 # ------------------------------------------------------------------
+# CLEANUP MARKER
 """
     
     editor = os.environ.get('EDITOR', 'nano')
@@ -388,7 +316,17 @@ def edit_notes(new_ver: str, draft: str) -> str:
                 break
             result_lines.append(line)
         
-        return "\n".join(result_lines).strip() + "\n\n"
+        full_notes = "\n".join(result_lines).strip() + "\n\n"
+        
+        # Extract the title line (first non-empty line after header)
+        # This is a bit heuristic but works for the GH release title
+        release_title_clean = final_title
+        for line in result_lines:
+            if line.strip() and not line.startswith("## ["):
+                release_title_clean = line.strip()
+                break
+                
+        return full_notes, release_title_clean
         
     finally:
         if os.path.exists(tf_path): 
@@ -430,7 +368,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     if "# Changelog" not in cleaned:
         cleaned = header_block.strip()
     
-    # Find where to insert
+    # Find where to insert (after header)
     lines = cleaned.split('\n')
     
     insert_at = len(lines)
@@ -788,6 +726,7 @@ def perform_git_release(repo_path: Path, version: str):
     
     print("\n🎉 Release complete!")
     # GH Release
+    # GH Release
     if shutil.which("gh") and input("\nDraft GitHub Release? (y/n): ").lower() == 'y':
         # Extract body from changelog
         cl_path = repo_path / "CHANGELOG.md"
@@ -799,56 +738,24 @@ def perform_git_release(repo_path: Path, version: str):
                 body_lines = body.splitlines()[1:]
                 body = "\n".join(body_lines).strip()
                 
-                # Try to find a title from recent merge commits
-                release_title = f"omnipkg {tag}"  # Default: just "omnipkg v2.2.2"
+                # Use the passed release title or fallback
+                from . import pypi
+                pkg_name = pypi.read_package_name(repo_path) or repo_path.name
                 
-                try:
-                    merge_log = run_git([
-                        "log", "--merges", "-n", "10",
-                        "--pretty=format:%s|||%b|||END"
-                    ], cwd=repo_path, check=False)
-                    
-                    candidates = []
-                    
-                    if merge_log:
-                        for block in merge_log.split("|||END"):
-                            if not block.strip(): 
-                                continue
-                                
-                            parts_m = block.split("|||", 2)
-                            if len(parts_m) >= 2:
-                                subject = parts_m[0].strip()
-                                body_m = parts_m[1].strip()
-                                
-                                # Skip noise
-                                if any(phrase in subject.lower() for phrase in [
-                                    "auto-merge", 
-                                    "sync main", 
-                                    "sync development",
-                                    "merge pull request"
-                                ]):
-                                    continue
-                                
-                                # Score by body length
-                                candidates.append((len(body_m), subject))
-                    
-                    if candidates:
-                        candidates.sort(key=lambda x: x[0], reverse=True)
-                        merge_title = candidates[0][1]
-                        release_title = f"omnipkg {tag} — {merge_title}"
-                        
-                except:
-                    pass
+                if not release_title:
+                    release_title = f"Release {version}"
+                
+                final_gh_title = f"{pkg_name} {tag} — {release_title}"
                 
                 with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
                     tf.write(body)
                     notes_file = tf.name
                 
-                # Use the generated title instead of just tag
+                # Use the generated title
                 subprocess.run([
                     "gh", "release", "create", tag, 
                     "-F", notes_file, 
-                    "-t", release_title,  # <-- Use the smart title here
+                    "-t", final_gh_title,
                     "--draft", 
                     "--target", "main"
                 ], cwd=repo_path)
@@ -1575,12 +1482,12 @@ def _main_logic(repo_path: Path):
     print("✓ Updated pyproject.toml")
     
     # Changelog
-    draft = get_smart_changelog(repo_path, last_tag_full, new_ver)
-    final_notes = edit_notes(new_ver, draft)
+    draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
+    final_notes, release_title = edit_notes(new_ver, draft, suggested_title)
     write_changelog(repo_path, final_notes, new_ver)
     
     # Finish
-    perform_git_release(repo_path, new_ver)
+    perform_git_release(repo_path, new_ver, release_title)
 
 if __name__ == "__main__":
     main_with_repo(Path.cwd())
