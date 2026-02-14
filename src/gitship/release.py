@@ -532,6 +532,61 @@ def restore_translation_stash(repo_path: Path):
         # No stash to restore, likely already popped or never created
         pass
 
+def reset_version_to_tag(repo_path: Path):
+    """Reset pyproject.toml version to match latest git tag."""
+    print("\n🔄 VERSION RESET")
+    print("=" * 60)
+    
+    # Get latest tag
+    try:
+        latest_tag = run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path)
+        latest_version = latest_tag.lstrip('v')
+    except SystemExit:
+        print("❌ No git tags found")
+        return
+    
+    # Get current TOML version
+    current_version = get_current_version(repo_path)
+    
+    print(f"  Current TOML: {current_version}")
+    print(f"  Latest tag:   {latest_tag} ({latest_version})")
+    
+    if current_version == latest_version:
+        print("\n✓ Versions already match!")
+        return
+    
+    confirm = input(f"\nReset TOML version to {latest_version}? (y/n): ").strip().lower()
+    
+    if confirm != 'y':
+        print("Cancelled")
+        return
+    
+    # Update pyproject.toml
+    toml_path = repo_path / "pyproject.toml"
+    content = toml_path.read_text()
+    
+    # Replace version line
+    new_content = re.sub(
+        r'^version\s*=\s*"[^"]+"',
+        f'version = "{latest_version}"',
+        content,
+        flags=re.MULTILINE
+    )
+    
+    toml_path.write_text(new_content)
+    
+    # Commit the change
+    run_git(["add", "pyproject.toml"], cwd=repo_path)
+    run_git(["commit", "-m", f"Reset version to {latest_version}"], cwd=repo_path)
+    
+    print(f"\n✓ Reset version to {latest_version}")
+    print("✓ Committed change")
+    
+    push = input("\nPush change? (y/n): ").strip().lower()
+    if push == 'y':
+        run_git(["push"], cwd=repo_path)
+        print("✓ Pushed")
+
 def perform_git_release(repo_path: Path, version: str):
     tag = f"v{version}"
     
@@ -691,7 +746,31 @@ def perform_git_release(repo_path: Path, version: str):
     
     # Restore stashed translations
     print("\n🎉 Release complete!")
-
+    print(f"\n✓ Tagged {tag}")
+    print(f"✓ Changes pushed")
+    
+    # PyPI Publishing
+    username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
+    
+    # Extract changelog
+    changelog_content = ""
+    cl_path = repo_path / "CHANGELOG.md"
+    if cl_path.exists():
+        content = cl_path.read_text()
+        parts = content.split("## [")
+        if len(parts) > 1:
+            changelog_content = ("## [" + parts[1]).split("## [")[0].strip()
+    
+    # Call PyPI handler
+    from gitship import pypi
+    pypi.handle_pypi_publishing(
+        repo_path=repo_path,
+        version=tag,
+        changelog=changelog_content,
+        username=username
+    )
+    
+    print("\n🎉 Release complete!")
     # GH Release
     if shutil.which("gh") and input("\nDraft GitHub Release? (y/n): ").lower() == 'y':
         # Extract body from changelog
@@ -1338,7 +1417,10 @@ def _main_logic(repo_path: Path):
                 
             elif choice == '4':
                 sys.exit(0)
-
+            
+            elif choice.lower() == 'reset':  # ✅ CORRECT - part of elif chain
+                reset_version_to_tag(repo_path)
+                return
     # Case 2: Clean Slate (Normal Flow)
     print(f"Current Version: {current_ver}")
     print("\n[1] Patch  [2] Minor  [3] Major")

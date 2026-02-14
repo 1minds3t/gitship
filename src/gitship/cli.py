@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from gitship import check, fix, review, release, commit
+    from gitship import check, fix, review, release, commit, branch, publish
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
@@ -35,11 +35,13 @@ def show_menu(repo_path: Path):
     print("  4. review   - Review changes between tags/commits with export")
     print("  5. release  - Bump version, changelog, and push release")
     print("  6. config   - View/edit gitship configuration")
+    print("  7. branch   - Manage branches (create, switch, rename, set default)")
+    print("  8. publish  - Create GitHub repo and push (with identity verification)")
     print("  0. exit     - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-6): ").strip()
+        choice = input("Enter your choice (0-8): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -65,6 +67,12 @@ def show_menu(repo_path: Path):
         print(f"  Auto-push: {config.get('auto_push', True)}")
         print()
         print("Edit ~/.gitship/config.json to modify settings")
+    elif choice == "7":
+        from gitship import branch
+        branch.main_with_repo(repo_path)
+    elif choice == "8":
+        from gitship import publish
+        publish.main_with_repo(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -113,7 +121,7 @@ Commands:
     parser.add_argument(
         '-v', '--version',
         action='version',
-        version='gitship 0.2.0'
+        version='gitship 0.3.0'  # Updated from 0.2.0
     )
     
     # Subcommands
@@ -199,6 +207,84 @@ Commands:
         type=str,
         help='Set default export path for diffs'
     )
+
+    # branch subcommand  
+    branch_parser = subparsers.add_parser(
+        'branch',
+        help='Manage branches (create, switch, rename, delete, set default)'
+    )
+    branch_parser.add_argument(
+        'operation',
+        nargs='?',
+        choices=['list', 'create', 'switch', 'rename', 'delete', 'set-default'],
+        help='Branch operation to perform'
+    )
+    branch_parser.add_argument(
+        '--name',
+        type=str,
+        help='Branch name for create/switch/delete operations'
+    )
+    branch_parser.add_argument(
+        '--from',
+        dest='from_ref',
+        type=str,
+        help='Starting point for new branch (create operation)'
+    )
+    branch_parser.add_argument(
+        '--old-name',
+        type=str,
+        help='Old branch name (rename operation)'
+    )
+    branch_parser.add_argument(
+        '--new-name',
+        type=str,
+        help='New branch name (rename operation)'
+    )
+    branch_parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force delete unmerged branch'
+    )
+    branch_parser.add_argument(
+        '--remote',
+        action='store_true',
+        help='Also update remote (for rename/set-default)'
+    )
+    branch_parser.add_argument(
+        '--switch',
+        action='store_true',
+        help='Switch to branch after creating'
+    )
+    branch_parser.add_argument(
+        '--show-remote',
+        action='store_true',
+        help='Show remote branches (list operation)'
+    )
+    # publish subcommand
+    publish_parser = subparsers.add_parser(
+        'publish',
+        help='Publish repository to GitHub with identity verification'
+    )
+    publish_parser.add_argument(
+        '--name',
+        type=str,
+        help='Repository name (default: directory name)'
+    )
+    publish_parser.add_argument(
+        '--description',
+        type=str,
+        help='Repository description'
+    )
+    publish_parser.add_argument(
+        '--private',
+        action='store_true',
+        help='Create private repository (default: public)'
+    )
+    publish_parser.add_argument(
+        '--identity',
+        type=str,
+        help='GitHub username to publish as (skip interactive selection)'
+    )
     
     args = parser.parse_args()
     
@@ -239,7 +325,28 @@ Commands:
             set_export_path(args.set_export_path)
         else:
             show_config()
-    
+    elif args.command == 'branch':
+        from gitship import branch
+        if args.operation:
+            branch.main_with_args(
+                repo_path=str(repo_path),
+                operation=args.operation,
+                name=args.name,
+                from_ref=args.from_ref,
+                old_name=args.old_name,
+                new_name=args.new_name,
+                force=args.force,
+                update_remote=args.remote,
+                switch=args.switch,
+                show_remote=args.show_remote
+            )
+        else:
+            # No operation, show interactive menu
+            branch.main_with_repo(repo_path)
+    elif args.command == 'publish':
+        from gitship import publish
+        publish.publish_repository(repo_path)
+        
     else:
         # No command specified, show menu
         show_menu(repo_path)
