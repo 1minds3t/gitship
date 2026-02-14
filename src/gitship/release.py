@@ -1359,7 +1359,8 @@ def _main_logic(repo_path: Path):
                 if not notes:
                     print("   ! Changelog entry empty or not found.")
                     if input("   Open editor to write manually? (y/n): ").lower() == 'y':
-                        notes = edit_notes(current_ver, "")
+                        # FIX: Provide default title to fix TypeError
+                        notes, _ = edit_notes(current_ver, "", f"Release {current_ver}")
                     else:
                         return
                 else:
@@ -1392,8 +1393,11 @@ def _main_logic(repo_path: Path):
                         notes_file = tf.name
                     
                     try:
+                        # Use a better title if possible
+                        release_title = f"Release {last_tag_full}"
+                        
                         subprocess.run(
-                            ["gh", "release", "create", last_tag_full, "-F", notes_file, "-t", last_tag_full, "--draft", "--target", "main"], 
+                            ["gh", "release", "create", last_tag_full, "-F", notes_file, "-t", release_title, "--draft", "--target", "main"], 
                             cwd=repo_path, 
                             check=True
                         )
