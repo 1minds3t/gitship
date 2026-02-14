@@ -1238,11 +1238,31 @@ def _main_logic(repo_path: Path):
         elif choice == '4':
             reset_version_to_tag(repo_path)
             return
-            
+
         else:
             print("Invalid choice.")
             return
-
+    # Case 1.4: Tag exists locally but not on remote
+    if last_tag_full:
+        tag_on_remote = check_remote_tag(repo_path, last_tag_full)
+        
+        if not tag_on_remote:
+            print(f"\n⚠️  UNPUSHED TAG DETECTED!")
+            print(f"   Tag {last_tag_full} exists locally but NOT on remote")
+            print(f"   This will cause GitHub release creation to fail.")
+            
+            push_now = input(f"\nPush tag to remote now? (y/n): ").strip().lower()
+            
+            if push_now == 'y':
+                print(f"\n🚀 Pushing {last_tag_full} to remote...")
+                try:
+                    run_git(["push", "origin", last_tag_full], cwd=repo_path)
+                    print(f"✓ Tag pushed successfully")
+                except:
+                    print(f"❌ Failed to push tag")
+                    return
+            else:
+                print("Skipped. You'll need to push manually before creating releases.")
         # Case 1.4: Incomplete release - tag/release exists but code changes uncommitted
     if current_ver == last_ver and last_tag_full:
         # Check if there are uncommitted code changes (excluding translations)
@@ -1343,6 +1363,22 @@ def _main_logic(repo_path: Path):
         )
         
         if res.returncode != 0: # Release does not exist
+            # Check if tag is on remote
+            tag_on_remote = check_remote_tag(repo_path, last_tag_full)
+            
+            if not tag_on_remote:
+                # Tag exists locally but NOT on remote!
+                print(f"\n⚠️  Tag {last_tag_full} exists LOCALLY but NOT on REMOTE!")
+                print(f"   Cannot create GitHub release without pushing tag first.")
+                print(f"\n🚀 Pushing tag to remote...")
+                
+                try:
+                    run_git(["push", "origin", last_tag_full], cwd=repo_path)
+                    print(f"✓ Tag {last_tag_full} pushed to remote")
+                except:
+                    print(f"❌ Failed to push tag")
+                    return
+            
             print(f"\n⚠️  Tag {last_tag_full} exists, but GitHub Release is MISSING.")
             print(f"   (You are currently on {current_ver})")
             
@@ -1368,6 +1404,25 @@ def _main_logic(repo_path: Path):
                     print(f"   ✓ Found {len(notes.splitlines())} lines of notes")
                 
                 if notes:
+                    # CHECK IF TAG EXISTS ON REMOTE FIRST!
+                    tag_on_remote = check_remote_tag(repo_path, last_tag_full)
+                    
+                    if not tag_on_remote:
+                        print(f"\n⚠️  Tag {last_tag_full} exists locally but NOT on remote!")
+                        push_choice = input("   Push tag to remote now? (y/n): ").strip().lower()
+                        
+                        if push_choice == 'y':
+                            print(f"   Pushing {last_tag_full} to remote...")
+                            try:
+                                run_git(["push", "origin", last_tag_full], cwd=repo_path)
+                                print(f"   ✓ Tag pushed to remote")
+                            except:
+                                print(f"   ❌ Failed to push tag")
+                                return
+                        else:
+                            print("   Cannot create GitHub release without remote tag")
+                            return
+                    
                     # Create release
                     print(f"   Drafting release on GitHub...")
                     with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
@@ -1382,6 +1437,18 @@ def _main_logic(repo_path: Path):
                         )
                         base_url = get_repo_url(repo_path)
                         print(f"\n✅ Draft release created: {base_url}/releases/tag/{last_tag_full}")
+                        
+                        # --- FIX: Trigger PyPI setup here before looping back ---
+                        username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
+                        from . import pypi
+                        pypi.handle_pypi_publishing(
+                            repo_path=repo_path,
+                            version=last_tag_full,
+                            changelog=notes,
+                            username=username
+                        )
+                        # -------------------------------------------------------
+
                     except subprocess.CalledProcessError:
                         print(f"\n❌ Failed to create GH release. Ensure 'gh' is auth'd.")
                     finally:
