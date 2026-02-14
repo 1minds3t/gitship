@@ -264,25 +264,32 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
     
     return "\n".join(lines), suggested_title
 
-def edit_notes(new_ver: str, draft: str, suggested_title: str) -> tuple[str, str]:
+def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "") -> tuple[str, str]:
     """
     Open editor with the changelog draft.
-    Returns (final_notes, release_title)
+    Returns (final_notes, release_title_suffix)
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     
     # Prompt for title if missing or user wants to change
     print(f"\n{Colors.CYAN}Release Title:{Colors.RESET}")
-    print(f"Suggested: {Colors.GREEN}{suggested_title}{Colors.RESET}")
-    user_title = input(f"Enter title (press Enter to use suggested): ").strip()
     
-    final_title = user_title if user_title else suggested_title
-    if not final_title:
-        final_title = "Maintenance release"
+    prefix = f"{pkg_name} v{new_ver} - " if pkg_name else ""
+    
+    print(f"Format will be: {Colors.DIM}{prefix}{Colors.RESET}{Colors.GREEN}[Title]{Colors.RESET}")
+    print(f"Suggested Title: {Colors.GREEN}{suggested_title}{Colors.RESET}")
+    
+    user_input = input(f"Enter Title (press Enter to use suggested): ").strip()
+    
+    final_suffix = user_input if user_input else suggested_title
+    if not final_suffix:
+        final_suffix = "Maintenance release"
         
+    # The changelog file itself usually just has the suffix as the top line description
+    # or we can put the full thing. Let's stick to the suffix for the markdown body.
     template = f"""## [{new_ver}] — {date_str}
 
-{final_title}
+{final_suffix}
 
 {draft}
 
