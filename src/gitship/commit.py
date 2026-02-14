@@ -1329,6 +1329,20 @@ def interactive_commit(analyzer: ChangeAnalyzer):
         
         print("\n✅ Changes committed successfully!")
         print(result.stdout)
+        
+        # ASK ABOUT PUSHING
+        try:
+            push = input("\nPush to remote? (y/n): ").strip().lower()
+            if push in ('y', 'yes'):
+                print(f"\n{Colors.CYAN}Pushing to remote...{Colors.RESET}")
+                push_result = analyzer.run_git(["push"])
+                if push_result.returncode == 0:
+                    print(f"{Colors.GREEN}✓ Pushed to remote{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}⚠ Push failed: {push_result.stderr}{Colors.RESET}")
+        except KeyboardInterrupt:
+            print("\n\nPush skipped.")
+        
         return True
     
     else:
