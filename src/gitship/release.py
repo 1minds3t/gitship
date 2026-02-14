@@ -1,0 +1,1376 @@
+#!/usr/bin/env python3
+"""
+releasegit - Interactive release automation tool.
+Handles state recovery, smart changelogs, and release publication.
+"""
+
+import os
+import sys
+import re
+import subprocess
+import tempfile
+import shutil
+from pathlib import Path
+from datetime import datetime
+from collections import Counter
+
+# --- GIT & SYSTEM HELPERS ---
+
+def run_git(args, cwd=None, check=True):
+    """Run git command and return stdout string."""
+    try:
+        res = subprocess.run(
+            ["git"] + args, cwd=cwd, capture_output=True, text=True, check=check
+        )
+        return res.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        if not check: return ""
+        print(f"Git error: {' '.join(args)}\n{e.stderr}")
+        sys.exit(1)
+
+def get_current_version(repo_path: Path) -> str:
+    toml = repo_path / "pyproject.toml"
+    if not toml.exists(): return "0.0.0"
+    content = toml.read_text()
+    match = re.search(r'^version\s*=\s*"(.*?)"', content, re.MULTILINE)
+    return match.group(1) if match else "0.0.0"
+
+def get_last_tag(repo_path: Path) -> str:
+    try:
+        return run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path)
+    except SystemExit:
+        return "" # No tags yet
+
+def check_remote_tag(repo_path: Path, tag: str) -> bool:
+    """Check if tag exists on origin."""
+    res = run_git(["ls-remote", "origin", "refs/tags/" + tag], cwd=repo_path, check=False)
+    return bool(res)
+
+def get_repo_url(repo_path: Path) -> str:
+    """Get the full GitHub repository URL (e.g. https://github.com/user/repo)."""
+    try:
+        # Method 1: Ask gh CLI (Most reliable)
+        res = subprocess.run(["gh", "repo", "view", "--json", "url", "-q", ".url"], cwd=repo_path, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+            
+        # Method 2: Parse git remote
+        res = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo_path, capture_output=True, text=True)
+        url = res.stdout.strip()
+        if "github.com" in url:
+            # Handle SSH: git@github.com:User/Repo.git -> User/Repo
+            if "git@" in url: 
+                path = url.split(":", 1)[1].replace(".git", "")
+                return f"https://github.com/{path}"
+            # Handle HTTPS: https://github.com/User/Repo.git -> User/Repo
+            return url.replace(".git", "")
+    except: pass
+    
+    return f"https://github.com/{repo_path.name}" # Fallback
+
+def is_dirty(repo_path: Path) -> bool:
+    """Check if relevant files are modified."""
+    res = run_git(["status", "--porcelain"], cwd=repo_path)
+    return "pyproject.toml" in res or "CHANGELOG.md" in res
+
+def get_unpushed_commits(repo_path: Path) -> int:
+    """Get count of commits ahead of origin/main."""
+    try:
+        # Fetch remote state without pulling
+        run_git(["fetch", "origin"], cwd=repo_path, check=False)
+        res = run_git(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_path, check=False)
+        return int(res) if res else 0
+    except:
+        return 0
+
+def has_translation_changes(repo_path: Path) -> bool:
+    """Check if translation files are modified (unstaged)."""
+    res = run_git(["status", "--porcelain"], cwd=repo_path)
+    print(f"[DEBUG] has_translation_changes status output: {repr(res[:200] if res else 'EMPTY')}")
+    if not res: return False
+    
+    lines = res.strip().split('\n')
+    for line in lines:
+        if not line.strip():
+            continue
+        # Status format is: "XY filename" where X=staged, Y=unstaged
+        if len(line) >= 4:
+            status_code = line[:2]
+            filename = line[3:].strip()
+            print(f"[DEBUG] Checking line: status='{status_code}' file='{filename}'")
+            # Check if either position has M/D/A (staged OR unstaged)
+            has_changes = any(c in ['M', 'D', 'A'] for c in status_code)
+            is_translation = '/locale/' in filename and '.po' in filename
+            
+            if has_changes and is_translation:
+                print(f"[DEBUG] FOUND translation change!")
+                return True
+    print(f"[DEBUG] No translation changes found")
+    return False
+
+# --- SMART CHANGELOG GENERATOR ---
+
+def extract_changelog_section(repo_path: Path, version: str) -> str:
+    """Extract changelog content for a specific version."""
+    cl_path = repo_path / "CHANGELOG.md"
+    if not cl_path.exists(): return ""
+    content = cl_path.read_text()
+    
+    # Match "## [version]" ... until next "## [" or End of File
+    # Robustly handles dates: "## [2.2.2] - 2024..." or just "## [2.2.2]"
+    pattern = rf"## \[(?:{re.escape(version)}|{re.escape(version)} )[^\]]*\].*?\n(.*?)(?=\n## \[|$)"
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> str:
+    """
+    Generate changelog with proper title, grouped commits, and duplicate counting.
+    """
+    range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
+    
+    # Get file stats
+    stats = ""
+    try:
+        stats_output = run_git([
+            "diff", "--shortstat", range_str
+        ], cwd=repo_path, check=False)
+        
+        if stats_output:
+            stats = stats_output.strip()
+    except:
+        pass
+    
+    # Get commit list
+    raw_log = run_git([
+        "log", range_str, "--pretty=format:%s"
+    ], cwd=repo_path, check=False)
+    
+    commit_list = []
+    seen = set()
+    
+    for line in raw_log.splitlines():
+        line = line.strip()
+        if not line: 
+            continue
+        
+        # Filter noise
+        if line.startswith("chore: release"):
+            continue
+        if line.startswith("Merge"):
+            continue
+        if any(phrase in line.lower() for phrase in ["auto-merge", "sync main", "sync development"]):
+            continue
+        
+        # Deduplicate
+        if line in seen:
+            continue
+            
+        seen.add(line)
+        commit_list.append(line)
+    
+    # Build the changelog
+    lines = []
+    
+    # Add placeholder for title (user will replace this)
+    lines.append("Implements comprehensive daemon management and i18n improvements:")
+    lines.append("")
+    lines.append("<!-- TODO: Replace above with a catchy title like: -->")
+    lines.append(f"<!-- v{new_version} — Surgical Knowledge Base, Build Resilience & Global Infrastructure -->")
+    lines.append("")
+    
+    # Add main description sections
+    lines.append("**Daemon & Worker Management:**")
+    lines.append("- Add 'daemon idle' command for Python version-specific worker pool config")
+    lines.append("- Group idle workers by Python version in resource monitor")
+    lines.append("- Add stale worker detection (>24h) with interactive cleanup")
+    lines.append("- Add daemon restart command (stop + start)")
+    lines.append("- Make Windows daemon opt-in (OMNIPKG_ENABLE_DAEMON_WINDOWS) with UTF-8/unbuffered I/O")
+    lines.append("- Remove implicit auto-start for explicit control")
+    lines.append("")
+    
+    lines.append("**Internationalization (i18n):**")
+    lines.append("- Complete Japanese translation (ja/LC_MESSAGES/omnipkg.po)")
+    lines.append("- Hoist i18n imports to global scope, fix UnboundLocalError")
+    lines.append("- Add OMNIPKG_LANG env var for language priority")
+    lines.append("- Propagate lang setting to all subprocesses and shims")
+    lines.append("- Replace print() with safe_print() for encoding safety")
+    lines.append("")
+    
+    lines.append("**Testing & CI:**")
+    lines.append("- Windows concurrency test workflow improvements")
+    lines.append("- Stress test CLI args for specific test selection")
+    lines.append("- Non-blocking daemon startup in concurrent tests")
+    lines.append("")
+    
+    # Add file stats
+    if stats:
+        lines.append(f"Files changed: {stats}")
+        lines.append("")
+    
+    # Group and count commits
+    if commit_list:
+        # Group by type
+        features = []
+        fixes = []
+        refactors = []
+        updates = {}  # Use dict to count duplicates
+        other = []
+        
+        for commit in commit_list:
+            if commit.startswith("feat"):
+                features.append(commit)
+            elif commit.startswith("fix"):
+                fixes.append(commit)
+            elif commit.startswith("refactor"):
+                refactors.append(commit)
+            elif commit.startswith("Update "):
+                # Extract the file/target being updated
+                # "Update windows-concurrency-test.yml" -> "windows-concurrency-test.yml"
+                target = commit.replace("Update ", "").strip()
+                updates[target] = updates.get(target, 0) + 1
+            else:
+                other.append(commit)
+        
+        # Output grouped sections
+        if features:
+            lines.append("**Features:**")
+            for c in features:
+                lines.append(f"- {c}")
+            lines.append("")
+        
+        if fixes:
+            lines.append("**Fixes:**")
+            for c in fixes:
+                lines.append(f"- {c}")
+            lines.append("")
+        
+        if refactors:
+            lines.append("**Refactoring:**")
+            for c in refactors:
+                lines.append(f"- {c}")
+            lines.append("")
+        
+        if updates:
+            lines.append("**Configuration Updates:**")
+            # Sort by count (most frequent first)
+            sorted_updates = sorted(updates.items(), key=lambda x: x[1], reverse=True)
+            for target, count in sorted_updates:
+                if count > 1:
+                    lines.append(f"- Update {target} (x{count})")
+                else:
+                    lines.append(f"- Update {target}")
+            lines.append("")
+        
+        if other:
+            lines.append("**Other Changes:**")
+            for c in other:
+                lines.append(f"- {c}")
+            lines.append("")
+    
+    lines.append("---")
+    
+    return "\n".join(lines)
+
+# EXAMPLE OUTPUT:
+"""
+## [2.2.2] — 2026-02-13
+
+Implements comprehensive daemon management and i18n improvements:
+
+<!-- TODO: Replace above with a catchy title like: -->
+<!-- v2.2.2 — Surgical Knowledge Base, Build Resilience & Global Infrastructure -->
+
+**Daemon & Worker Management:**
+- Add 'daemon idle' command for Python version-specific worker pool config
+- Group idle workers by Python version in resource monitor
+- Add stale worker detection (>24h) with interactive cleanup
+- Add daemon restart command (stop + start)
+- Make Windows daemon opt-in (OMNIPKG_ENABLE_DAEMON_WINDOWS) with UTF-8/unbuffered I/O
+- Remove implicit auto-start for explicit control
+
+**Internationalization (i18n):**
+- Complete Japanese translation (ja/LC_MESSAGES/omnipkg.po)
+- Hoist i18n imports to global scope, fix UnboundLocalError
+- Add OMNIPKG_LANG env var for language priority
+- Propagate lang setting to all subprocesses and shims
+- Replace print() with safe_print() for encoding safety
+
+**Testing & CI:**
+- Windows concurrency test workflow improvements
+- Stress test CLI args for specific test selection
+- Non-blocking daemon startup in concurrent tests
+
+Files changed: 78 files changed, 9304 insertions(+), 6573 deletions(-)
+
+**Features:**
+- feat(i18n): Integrate and propagate i18n across core components
+
+**Fixes:**
+- fix(i18n): finalize Japanese translation
+- fix(cli): hoist i18n imports to global scope to prevent UnboundLocalError
+
+**Refactoring:**
+- refactor: remove undefined name from `__all__`
+- refactor: remove reimported module
+- refactor: remove unnecessary return statement
+
+**Configuration Updates:**
+- Update windows-concurrency-test.yml (x4)
+- Update README.md (x4)
+- Update publish.yml (x6)
+- Update conda_build.yml (x5)
+- Update meta-platforms.yaml (x2)
+- Update meta-noarch.yaml
+
+**Other Changes:**
+- restore: recover deleted changelog
+
+---
+"""
+
+
+def edit_notes(new_ver: str, draft: str) -> str:
+    """
+    Open editor with the changelog draft.
+    Adds clear instructions and the version header.
+    """
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    template = f"""## [{new_ver}] - {date_str}
+
+{draft}
+
+# ------------------------------------------------------------------
+# INSTRUCTIONS:
+# 1. Replace the TODO section at top with actual description
+# 2. Review and edit the commit list
+# 3. Delete everything below the "CLEANUP MARKER" line
+# 4. Delete these instruction lines (starting with #)
+# 5. Save and exit
+# ------------------------------------------------------------------
+"""
+    
+    editor = os.environ.get('EDITOR', 'nano')
+    with tempfile.NamedTemporaryFile(suffix=".md", mode='w+', delete=False) as tf:
+        tf.write(template)
+        tf_path = tf.name
+    
+    try:
+        subprocess.call([editor, tf_path])
+        with open(tf_path) as f:
+            content = f.read()
+        
+        # Remove instruction lines
+        lines = [l for l in content.splitlines() if not l.strip().startswith("#")]
+        
+        # Find and remove everything after cleanup marker
+        result_lines = []
+        for line in lines:
+            if "CLEANUP MARKER" in line:
+                break
+            result_lines.append(line)
+        
+        return "\n".join(result_lines).strip() + "\n\n"
+        
+    finally:
+        if os.path.exists(tf_path): 
+            os.unlink(tf_path)
+
+def write_changelog(repo_path: Path, notes: str, version: str):
+    """
+    Write changelog entry with proper title format.
+    """
+    cl = repo_path / "CHANGELOG.md"
+    
+    # POST-PROCESS: Add header if missing, with em dash
+    if not notes.strip().startswith(f"## [{version}]"):
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        # Use em dash (—) for title format
+        notes = f"## [{version}] — {date_str}\n\n{notes}"
+    
+    header_block = """# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+    
+    # Create file if doesn't exist
+    if not cl.exists():
+        cl.write_text(f"{header_block}{notes}\n")
+        return
+
+    content = cl.read_text()
+    
+    # Remove any existing entry for this version
+    version_pattern = rf"^## \[{re.escape(version)}\].*?(?=^## \[|\Z)"
+    cleaned = re.sub(version_pattern, "", content, flags=re.MULTILINE | re.DOTALL).strip()
+    
+    # Ensure header exists
+    if "# Changelog" not in cleaned:
+        cleaned = header_block.strip()
+    
+    # Find where to insert
+    lines = cleaned.split('\n')
+    
+    insert_at = len(lines)
+    for i, line in enumerate(lines):
+        if line.startswith("## ["):
+            insert_at = i
+            break
+    
+    # Insert the new version
+    if insert_at < len(lines):
+        new_lines = lines[:insert_at] + ['', notes.rstrip(), ''] + lines[insert_at:]
+    else:
+        new_lines = lines + ['', notes.rstrip()]
+    
+    # Clean up excessive blank lines
+    result = '\n'.join(new_lines)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    
+    cl.write_text(result.rstrip() + '\n')
+
+def handle_translation_stash(repo_path: Path) -> bool:
+    """Stash translation files if they're the only changes. Returns True if stashed."""
+    if not has_translation_changes(repo_path):
+        return False
+    
+    print("\n⚠️  Translation files (.po) detected as only uncommitted changes.")
+    print("These will be stashed before push and restored after.")
+    
+    run_git(["stash", "push", "-m", "Auto-stash: translation files before release"], cwd=repo_path)
+    print("✓ Translation files stashed")
+    return True
+
+def atomic_stash_and_run(repo_path: Path, git_command: list, description: str):
+    """
+    Atomically stash translations, run git command, then restore.
+    This prevents the AI translator from writing more changes between stash and command.
+    """
+    print(f"\n[DEBUG] atomic_stash_and_run called for: {description}")
+    print(f"[DEBUG] Command: git {' '.join(git_command)}")
+    
+    # Check if we need to stash RIGHT NOW
+    needs_stash = has_translation_changes(repo_path)
+    print(f"[DEBUG] Translation changes detected: {needs_stash}")
+    
+    if needs_stash:
+        print(f"\n🔒 Stashing translations immediately before {description}...")
+        stash_result = subprocess.run(
+            ["git", "stash", "push", "-m", f"Auto-stash before {description}"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if stash_result.returncode == 0:
+            print("✓ Stashed")
+        else:
+            print(f"[DEBUG] Stash failed: {stash_result.stderr}")
+    
+    # Immediately run the command
+    print(f"[DEBUG] Running git command...")
+    result = subprocess.run(
+        ["git"] + git_command,
+        cwd=repo_path,
+        capture_output=True,
+        text=True
+    )
+    print(f"[DEBUG] Command exit code: {result.returncode}")
+    if result.returncode != 0:
+        print(f"[DEBUG] Command stderr: {result.stderr}")
+        print(f"[DEBUG] Command stdout: {result.stdout}")
+    
+    # Restore if we stashed
+    if needs_stash:
+        stash_list = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        ).stdout
+        
+        if f"Auto-stash before {description}" in stash_list:
+            print(f"↩️  Restoring translations after {description}...")
+            pop_result = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if pop_result.returncode == 0:
+                print("✓ Restored")
+            else:
+                print(f"[DEBUG] Stash pop had issues: {pop_result.stderr}")
+    
+    return result
+
+def restore_translation_stash(repo_path: Path):
+    """Restore stashed translation files."""
+    stash_list = run_git(["stash", "list"], cwd=repo_path, check=False)
+    if "Auto-stash: translation files before release" in stash_list:
+        print("\n↩️  Restoring translation files from stash...")
+        result = subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("✓ Translation files restored")
+        else:
+            # Stash pop failed, maybe conflict
+            if "conflict" in result.stderr.lower():
+                print("⚠️  Stash had conflicts, keeping stash. Run 'git stash pop' manually later.")
+            else:
+                print("⚠️  Stash restore had issues (may already be applied)")
+    else:
+        # No stash to restore, likely already popped or never created
+        pass
+
+def perform_git_release(repo_path: Path, version: str):
+    tag = f"v{version}"
+    
+    # Check remote first
+    if check_remote_tag(repo_path, tag):
+        print(f"\n❌ Error: Tag {tag} already exists on remote!")
+        print("Run 'git fetch --tags' to sync, or bump to a higher version.")
+        return
+
+    print(f"\nPreparing to release You didn't actually replace the function in your releasegit.py file. {tag}...")
+
+    # Get ALL modified files (excluding translations)
+    status_output = run_git(["status", "--porcelain"], cwd=repo_path)
+    files_to_add = ["pyproject.toml", "CHANGELOG.md"]
+
+    for line in status_output.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Split on whitespace - format is: "STATUS filename"
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            status_code, filename = parts
+            # Exclude translations and files already added
+            if '/locale/' not in filename and filename not in files_to_add:
+                files_to_add.append(filename)
+
+    print(f"  ✓ Staging {len(files_to_add)} files: {', '.join(files_to_add[:5])}{'...' if len(files_to_add) > 5 else ''}")
+
+    # Add all relevant files
+    for f in files_to_add:
+        run_git(["add", f], cwd=repo_path)
+
+    print(f"  ✓ Staged {len(files_to_add)} files")
+    
+    # Commit
+    try:
+        run_git(["commit", "-m", f"chore: release {tag}"], cwd=repo_path)
+        print(f"✓ Committed release {tag}")
+    except:
+        print("  (Nothing to commit, proceeding...)")
+    
+    # Check if we need to pull (only if not already rebased)
+    unpushed_check = get_unpushed_commits(repo_path)
+    if unpushed_check > 0:
+        print(f"\n🔄 You have {unpushed_check} unpushed commits, checking for remote updates...")
+        
+        # ATOMIC: Stash right before pull to prevent AI translator interference
+        result = atomic_stash_and_run(repo_path, ["pull", "origin", "main", "--rebase"], "pull rebase")
+        
+        if result.returncode != 0:
+            # Check if it's a conflict
+            if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                print("\n🚨 MERGE CONFLICTS DETECTED during rebase!")
+                
+                # Get conflicted files
+                conflicts = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=repo_path, check=False)
+                conflict_files = [f for f in conflicts.split('\n') if f.strip()]
+                
+                if conflict_files:
+                    print(f"\n   Conflicted files ({len(conflict_files)}):")
+                    for f in conflict_files:
+                        print(f"     - {f}")
+                    
+                    print("\nWhat would you like to do?")
+                    print("  1. RESOLVE - Resolve conflicts now")
+                    print("  2. ABORT   - Abort rebase and exit")
+                    
+                    choice = input("\nChoice (1-2): ").strip()
+                    
+                    if choice == '1':
+                        # Launch resolver
+                        resolver_path = Path(__file__).parent / "resolve_conflicts.py"
+                        if resolver_path.exists():
+                            print("\n🔧 Launching conflict resolver...")
+                            subprocess.call(["python3", str(resolver_path)], cwd=repo_path)
+                        else:
+                            # Simple fallback
+                            for f in conflict_files:
+                                print(f"\n📁 {f}")
+                                print("  O - OURS (local) | T - THEIRS (remote)")
+                                fc = input("Choice (O/T): ").strip().upper()
+                                if fc == 'O':
+                                    run_git(["checkout", "--ours", f], cwd=repo_path)
+                                elif fc == 'T':
+                                    run_git(["checkout", "--theirs", f], cwd=repo_path)
+                                run_git(["add", f], cwd=repo_path)
+                        
+                        # Check if resolved
+                        remaining = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=repo_path, check=False)
+                        if remaining.strip():
+                            print("\n⚠️  Still have unresolved conflicts. Resolve and re-run.")
+                            sys.exit(1)
+                        
+                        # Continue rebase ATOMICALLY (stash right before)
+                        print("\n🔄 Continuing rebase...")
+                        result = atomic_stash_and_run(repo_path, ["rebase", "--continue"], "rebase continue")
+                        
+                        if result.returncode != 0:
+                            # Check if NEW conflicts appeared
+                            if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                                print("\n🚨 NEW CONFLICTS appeared during rebase!")
+                                print("   The rebase progressed but hit conflicts in another commit.")
+                                print("\n   Looping back to conflict resolution...")
+                                # LOOP BACK by recursively calling main logic
+                                return _main_logic(repo_path)
+                            else:
+                                print("⚠️  Rebase continue failed:")
+                                print(result.stdout)
+                                print(result.stderr)
+                                print("\nResolve issues and re-run gitship releasegit")
+                                sys.exit(1)
+                    else:
+                        run_git(["rebase", "--abort"], cwd=repo_path)
+                        print("✓ Rebase aborted")
+                        sys.exit(1)
+            else:
+                print("⚠️  Pull had issues (non-conflict), proceeding...")
+        else:
+            print("✓ Pull complete, rebased on remote")
+    else:
+        print("\n✓ Already up to date with remote")
+    
+    # CRITICAL: Push commits FIRST, then tags (with atomic stashing)
+    print("\n📤 Step 1/2: Pushing commits to origin/main...")
+    result = atomic_stash_and_run(repo_path, ["push", "origin", "main"], "push commits")
+    
+    if result.returncode != 0:
+        print("\n❌ COMMIT PUSH FAILED - ABORTING RELEASE")
+        print("   Tag will NOT be created/pushed to prevent orphaned tags.")
+        print(f"   Error: {result.stderr}")
+        print("   Recommendation:")
+        print("     1. Run 'git pull --rebase' to sync with remote")
+        print("     2. Resolve any conflicts")
+        print("     3. Re-run gitship releasegit")
+        sys.exit(1)
+    
+    print("✓ Commits pushed!")
+    
+    # Only create and push tag if commits pushed successfully
+    print(f"\n🏷️  Step 2/2: Creating and pushing tag {tag}...")
+    try:
+        run_git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=repo_path)
+        print(f"  ✓ Created tag {tag}")
+    except:
+        print(f"  ! Tag {tag} already exists locally, using existing tag")
+
+    try:
+        run_git(["push", "origin", tag], cwd=repo_path)
+        print(f"  ✓ Pushed tag {tag}")
+    except SystemExit:
+        print(f"\n⚠️  Tag push failed.")
+        print(f"   Your commits are safe on remote, but tag may need manual push:")
+        print(f"     git push origin {tag}")
+        sys.exit(1)
+    
+    # Restore stashed translations
+    print("\n🎉 Release complete!")
+
+    # GH Release
+    if shutil.which("gh") and input("\nDraft GitHub Release? (y/n): ").lower() == 'y':
+        # Extract body from changelog
+        cl_path = repo_path / "CHANGELOG.md"
+        if cl_path.exists():
+            content = cl_path.read_text()
+            parts = content.split("## [")
+            if len(parts) > 1:
+                body = "## [" + parts[1]
+                body_lines = body.splitlines()[1:]
+                body = "\n".join(body_lines).strip()
+                
+                # Try to find a title from recent merge commits
+                release_title = f"omnipkg {tag}"  # Default: just "omnipkg v2.2.2"
+                
+                try:
+                    merge_log = run_git([
+                        "log", "--merges", "-n", "10",
+                        "--pretty=format:%s|||%b|||END"
+                    ], cwd=repo_path, check=False)
+                    
+                    candidates = []
+                    
+                    if merge_log:
+                        for block in merge_log.split("|||END"):
+                            if not block.strip(): 
+                                continue
+                                
+                            parts_m = block.split("|||", 2)
+                            if len(parts_m) >= 2:
+                                subject = parts_m[0].strip()
+                                body_m = parts_m[1].strip()
+                                
+                                # Skip noise
+                                if any(phrase in subject.lower() for phrase in [
+                                    "auto-merge", 
+                                    "sync main", 
+                                    "sync development",
+                                    "merge pull request"
+                                ]):
+                                    continue
+                                
+                                # Score by body length
+                                candidates.append((len(body_m), subject))
+                    
+                    if candidates:
+                        candidates.sort(key=lambda x: x[0], reverse=True)
+                        merge_title = candidates[0][1]
+                        release_title = f"omnipkg {tag} — {merge_title}"
+                        
+                except:
+                    pass
+                
+                with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
+                    tf.write(body)
+                    notes_file = tf.name
+                
+                # Use the generated title instead of just tag
+                subprocess.run([
+                    "gh", "release", "create", tag, 
+                    "-F", notes_file, 
+                    "-t", release_title,  # <-- Use the smart title here
+                    "--draft", 
+                    "--target", "main"
+                ], cwd=repo_path)
+                
+                os.unlink(notes_file)
+                # Loop back to refresh state
+                print("\n🔄 Refreshing state...")
+                return _main_logic(repo_path)
+
+# --- MAIN FLOW ---
+
+def main_with_repo(repo_path: Path):
+    try:
+        _main_logic(repo_path)
+    except KeyboardInterrupt:
+        print("\n\n⛔ Operation cancelled by user.")
+        sys.exit(130)
+
+def _main_logic(repo_path: Path):
+    print(f"\n⚓ GITSHIP RELEASE: {repo_path.name}")
+    print("=" * 60)
+    
+    # CRITICAL: Check if already in rebase/merge state FIRST
+    git_dir = repo_path / ".git"
+    in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+    in_merge = (git_dir / "MERGE_HEAD").exists()
+    
+    if in_rebase or in_merge:
+        print("🚨 REBASE/MERGE IN PROGRESS DETECTED")
+        print("   You have an unfinished rebase or merge.")
+        
+        # Check for MERGE conflicts (unmerged paths)
+        conflicts = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=repo_path, check=False)
+        all_conflict_files = [f for f in conflicts.split('\n') if f.strip()]
+        
+        # AUTO-RESOLVE translation file conflicts (always THEIRS) - don't bother user
+        translation_conflicts = [f for f in all_conflict_files if '/locale/' in f and '.po' in f]
+        real_conflicts = [f for f in all_conflict_files if f not in translation_conflicts]
+        
+        if translation_conflicts:
+            print(f"\n🔄 Auto-resolving {len(translation_conflicts)} translation file conflict(s) with THEIRS...")
+            for f in translation_conflicts:
+                run_git(["checkout", "--theirs", f], cwd=repo_path, check=False)
+                run_git(["add", f], cwd=repo_path, check=False)
+            print("✓ Translation conflicts auto-resolved")
+        
+        conflict_files = real_conflicts  # Only show real conflicts to user
+        
+        # Check for ALL uncommitted changes (staged + unstaged) that will block rebase
+        # git status --porcelain shows both
+        status_output = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+        uncommitted_files = []
+        for line in status_output.split('\n'):
+            if line.strip():
+                # Parse status format: "XY filename" where X is staged, Y is unstaged
+                # We care about ANY changes (staged or unstaged)
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) == 2:
+                    status_code, filename = parts
+                    # Skip translation files - handle separately
+                    if '/locale/' in filename and '.po' in filename:
+                        continue
+                    # Skip if it's a staged change for files already in the commit
+                    # We only care about unstaged modifications (M in second position)
+                    if len(status_code) >= 2 and status_code[1] in ['M', 'D', 'A']:
+                        uncommitted_files.append(filename)
+        
+        print(f"[DEBUG] Real conflicts (non-translation): {len(conflict_files)}")
+        print(f"[DEBUG] Uncommitted changes (non-translation): {len(uncommitted_files)}")
+        if uncommitted_files:
+            print(f"[DEBUG] Uncommitted files: {uncommitted_files}")
+        
+        # If we auto-resolved translation conflicts and there are NO other issues, auto-continue
+        if translation_conflicts and not conflict_files and not uncommitted_files:
+            print("\n✓ Only translation conflicts detected - auto-continuing rebase...")
+            result = atomic_stash_and_run(repo_path, ["rebase", "--continue"], "rebase continue")
+            
+            if result.returncode == 0:
+                print("✓ Rebase continued successfully!")
+                # DON'T RETURN - fall through to check if rebase is complete and push
+            elif "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                print("\n🔄 New conflicts appeared, looping back...")
+                return _main_logic(repo_path)
+            else:
+                print("⚠️  Rebase failed:")
+                print(result.stdout)
+                return
+        
+        # Check if rebase is actually done now
+        git_dir_check = repo_path / ".git"
+        still_in_rebase = (git_dir_check / "rebase-merge").exists() or (git_dir_check / "rebase-apply").exists()
+        
+        if not still_in_rebase:
+            # Rebase completed! Fall through to continue with push
+            print("\n✅ Rebase completed! Continuing with release...")
+            # Don't return - let it fall through to the version/push logic below
+        elif conflict_files:
+            print(f"\n   ⚠️  MERGE CONFLICTS ({len(conflict_files)}):")
+            for f in conflict_files:
+                print(f"     - {f}")
+            
+            print("\nWhat would you like to do?")
+            print("  1. RESOLVE - Resolve conflicts (pick OURS/THEIRS)")
+            print("  2. ABORT   - Abort rebase/merge and start fresh")
+            
+            choice = input("\nChoice (1-2): ").strip()
+            
+            if choice == '1':
+                # Check if resolve_conflicts.py exists
+                resolver_path = Path(__file__).parent / "resolve_conflicts.py"
+                
+                if resolver_path.exists():
+                    print("\n🔧 Launching standalone conflict resolver...")
+                    subprocess.call(["python3", str(resolver_path)], cwd=repo_path)
+                    
+                    # Check if rebase was aborted in the resolver
+                    git_dir_check = repo_path / ".git"
+                    still_in_rebase = (git_dir_check / "rebase-merge").exists() or (git_dir_check / "rebase-apply").exists()
+                    
+                    if not still_in_rebase:
+                        print("\n✓ Rebase was aborted. Exiting.")
+                        return
+                    
+                    # Check if conflicts are resolved
+                    remaining = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=repo_path, check=False)
+                    remaining_files = [f for f in remaining.split('\n') if f.strip()]
+                    
+                    if remaining_files:
+                        print(f"\n⚠️  Still have {len(remaining_files)} unresolved file(s):")
+                        for f in remaining_files:
+                            print(f"  - {f}")
+                        print("\nResolve them manually and re-run gitship releasegit")
+                        return
+                    else:
+                        print("\n✅ All conflicts resolved!")
+                else:
+                    # Fallback: simple inline resolution
+                    print("\n⚠️  resolve_conflicts.py not found, using simple resolver...")
+                    print("    (Place resolve_conflicts.py in same dir as releasegit.py for full features)")
+                    
+                    for f in conflict_files:
+                        print(f"\n📁 File: {f}")
+                        print("  O - Keep OURS (local)")
+                        print("  T - Keep THEIRS (remote/incoming)")
+                        
+                        file_choice = input("Choice (O/T): ").strip().upper()
+                        
+                        if file_choice == 'O':
+                            run_git(["checkout", "--ours", f], cwd=repo_path)
+                            run_git(["add", f], cwd=repo_path)
+                            print(f"  ✓ Kept OURS")
+                        elif file_choice == 'T':
+                            run_git(["checkout", "--theirs", f], cwd=repo_path)
+                            run_git(["add", f], cwd=repo_path)
+                            print(f"  ✓ Kept THEIRS")
+                        else:
+                            print(f"  ⚠️ Skipped {f}")
+                            continue
+                
+                # Continue rebase with atomic stashing
+                print("\n🔄 Continuing rebase...")
+                result = atomic_stash_and_run(repo_path, ["rebase", "--continue"], "rebase continue")
+                
+                if result.returncode == 0:
+                    print("✓ Rebase continued successfully!")
+                    print("\nNow re-run releasegit to complete the release.")
+                    return
+                else:
+                    # Check if new conflicts appeared
+                    if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                        print("\n🚨 NEW CONFLICTS appeared during rebase!")
+                        print("   The rebase progressed but hit conflicts in another commit.")
+                        print("\n   Re-running conflict detection...")
+                        # LOOP BACK to detect and resolve the new conflicts
+                        return _main_logic(repo_path)
+                    else:
+                        print("⚠️ Rebase continue had issues:")
+                        print(result.stdout)
+                        print(result.stderr)
+                        return
+                
+            else:  # Abort
+                if in_rebase:
+                    run_git(["rebase", "--abort"], cwd=repo_path)
+                else:
+                    run_git(["merge", "--abort"], cwd=repo_path)
+                print("✓ Aborted. Starting fresh...")
+                # Fall through to normal flow
+                
+        elif uncommitted_files:
+            # Uncommitted changes blocking rebase (like translation files)
+            print(f"\n   ⚠️  UNCOMMITTED CHANGES blocking rebase ({len(uncommitted_files)}):")
+            for f in uncommitted_files:
+                print(f"     - {f}")
+            
+            print("\n   These must be stashed or committed before rebase can continue.")
+            print("\nWhat would you like to do?")
+            print("  1. STASH & CONTINUE - Stash changes and continue rebase")
+            print("  2. ABORT            - Abort rebase and start fresh")
+            
+            choice = input("\nChoice (1-2): ").strip()
+            
+            if choice == '1':
+                # Stash and continue atomically
+                print("\n🔒 Stashing uncommitted changes...")
+                result = atomic_stash_and_run(repo_path, ["rebase", "--continue"], "rebase continue")
+                
+                if result.returncode == 0:
+                    print("✓ Rebase continued successfully!")
+                    print("\nNow re-run releasegit to complete the release.")
+                    return
+                else:
+                    # Check if it failed due to NEW conflicts
+                    if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                        print("\n🚨 NEW CONFLICTS appeared during rebase!")
+                        print("   The rebase progressed but hit conflicts in another commit.")
+                        print("\n   Re-running conflict detection...")
+                        # DO NOT RETURN - LOOP BACK to the start to detect and resolve new conflicts
+                        # Recursive call to handle the new conflict state
+                        return _main_logic(repo_path)
+                    else:
+                        print("⚠️ Rebase continue failed:")
+                        print(result.stdout)
+                        print(result.stderr)
+                        return
+            else:
+                if in_rebase:
+                    run_git(["rebase", "--abort"], cwd=repo_path)
+                else:
+                    run_git(["merge", "--abort"], cwd=repo_path)
+                print("✓ Aborted. Starting fresh...")
+                
+        else:
+            # No conflicts AND no uncommitted changes - ready to continue
+            print("\n✓ Ready to continue rebase...")
+            result = atomic_stash_and_run(repo_path, ["rebase", "--continue"], "rebase continue")
+            
+            if result.returncode == 0:
+                print("✓ Rebase continued successfully!")
+                print("\nNow re-run releasegit to complete the release.")
+                return
+            else:
+                # Check if conflicts appeared
+                if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                    print("\n🚨 NEW CONFLICTS appeared during rebase!")
+                    print("   The rebase progressed but hit conflicts in another commit.")
+                    print("\n   Re-running conflict detection...")
+                    # LOOP BACK
+                    return _main_logic(repo_path)
+                else:
+                    print("⚠️ Rebase continue failed:")
+                    print(result.stdout)
+                    print(result.stderr)
+                    print("\nResolve issues manually and re-run.")
+                    return
+    
+    current_ver = get_current_version(repo_path)
+    last_tag_full = get_last_tag(repo_path)
+    last_ver = last_tag_full.lstrip('v') if last_tag_full else "0.0.0"
+    unpushed = get_unpushed_commits(repo_path)
+    
+    # STATE DETECTION
+    
+    # Case 0: Tag exists remotely but commits not pushed (Orphaned Tag)
+    if current_ver == last_ver and unpushed > 0 and check_remote_tag(repo_path, f"v{current_ver}"):
+        print(f"🚨 ORPHANED TAG DETECTED: v{current_ver}")
+        print(f"   Remote has tag v{current_ver}, but you have {unpushed} unpushed commits")
+        print(f"   For PyPI to work, the tag MUST point to commits that exist on remote.")
+        print(f"\n   FIX REQUIRED:")
+        print(f"   1. Delete orphaned tag (local + remote)")
+        print(f"   2. Push {unpushed} commits")
+        print(f"   3. Recreate tag pointing to pushed commits")
+        
+        print("\nWhat would you like to do?")
+        print(f"  1. AUTO-FIX:  Delete tag, push commits, recreate tag (recommended)")
+        print(f"  2. ABORT:     Exit and handle manually")
+        
+        choice = input("\nChoice (1-2): ").strip()
+        
+        if choice == '1':
+            tag = f"v{current_ver}"
+            
+            # Step 1: Delete tag (remote then local)
+            print(f"\n🗑️  Step 1/3: Deleting orphaned tag {tag}...")
+            try:
+                run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted remote tag {tag}")
+            except:
+                print(f"  ! Remote tag delete failed (may not exist)")
+            
+            try:
+                run_git(["tag", "-d", tag], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted local tag {tag}")
+            except:
+                print(f"  ! Local tag delete failed (may not exist)")
+            
+            # Step 2: Push commits
+            stashed = handle_translation_stash(repo_path)
+            print(f"\n📤 Step 2/3: Pushing {unpushed} commits to origin/main...")
+            try:
+                result = subprocess.run(
+                    ["git", "pull", "origin", "main", "--rebase"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode != 0 and ("CONFLICT" in result.stdout or "CONFLICT" in result.stderr):
+                    print("\n⚠️  MERGE CONFLICTS during rebase!")
+                    print("  You're in the middle of fixing an orphaned tag.")
+                    print("  Please resolve conflicts manually, then re-run gitship.")
+                    print("\n  Quick commands:")
+                    print("    - Resolve conflicts in files")
+                    print("    - git add <resolved-files>")
+                    print("    - git rebase --continue")
+                    print("    - Re-run: gitship releasegit")
+                    if stashed:
+                        restore_translation_stash(repo_path)
+                    sys.exit(1)
+                
+                run_git(["push", "origin", "main"], cwd=repo_path)
+                print("  ✓ Commits pushed successfully!")
+            except SystemExit:
+                print("\n⚠️  Commit push failed. Cannot recreate tag safely.")
+                if stashed:
+                    restore_translation_stash(repo_path)
+                sys.exit(1)
+            
+            # Step 3: Recreate tag
+            print(f"\n🏷️  Step 3/3: Recreating tag {tag}...")
+            try:
+                run_git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=repo_path)
+                run_git(["push", "origin", tag], cwd=repo_path)
+                print(f"  ✓ Tag {tag} created and pushed!")
+                print("\n🎉 Orphaned tag fixed! PyPI should work now.")
+            except SystemExit:
+                print(f"\n⚠️  Tag creation/push failed.")
+                sys.exit(1)
+            
+            if stashed:
+                restore_translation_stash(repo_path)
+            return
+                
+        else:
+            print("Exiting. Handle the orphaned tag manually.")
+            return
+    
+    # Case 1: Version bumped but not tagged (In Progress)
+    if current_ver != last_ver and current_ver > last_ver:
+        print(f"⚠️  RELEASE IN PROGRESS DETECTED")
+        print(f"   TOML Version: {current_ver}")
+        print(f"   Git Tag:      {last_tag_full}")
+        print(f"   Local Changes: {'Yes' if is_dirty(repo_path) else 'No'}")
+        
+        print("\nWhat would you like to do?")
+        print(f"  1. RESUME:  Commit, Tag & Push {current_ver} (Use current changelog)")
+        print(f"  2. REFRESH: Regenerate Changelog & Release {current_ver} (If you added more commits)")
+        print(f"  3. ABORT:   Revert TOML to {last_ver} and exit")
+        
+        choice = input("\nChoice (1-3): ").strip()
+        
+        if choice == '1':
+            perform_git_release(repo_path, current_ver)
+            return
+            
+        elif choice == '2':
+                tag = last_tag_full
+                print(f"\n🔄 Resetting release state for {tag}...")
+                
+                # 1. Delete remote tag
+                run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted remote tag {tag}")
+                
+                # 2. Delete local tag
+                run_git(["tag", "-d", tag], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted local tag {tag}")
+                
+                # 3. Get previous tag
+                prev_tag = get_last_tag(repo_path)
+                
+                print("\nRegenerating changelog from git history...")
+                draft = get_smart_changelog(repo_path, prev_tag, current_ver)
+                
+                # 4. Auto-format notes (SKIP EDITOR)
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                final_notes = f"## [{current_ver}] - {date_str}\n\n{draft}\n"
+                
+                print(f"  ✓ Generated {len(final_notes.splitlines())} lines of changelog")
+                
+                write_changelog(repo_path, final_notes, current_ver)
+                perform_git_release(repo_path, current_ver)
+                return
+            
+        elif choice == '3':
+            print(f"Reverting pyproject.toml to {last_ver}...")
+            toml = repo_path / "pyproject.toml"
+            content = toml.read_text()
+            toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{last_ver}"', content, count=1, flags=re.MULTILINE))
+            print("Done. Exiting.")
+            return
+        else:
+            print("Invalid choice.")
+            return
+
+        # Case 1.4: Incomplete release - tag/release exists but code changes uncommitted
+    if current_ver == last_ver and last_tag_full:
+        # Check if there are uncommitted code changes (excluding translations)
+        status_output = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+        code_changes = []
+        
+        for line in status_output.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Split on whitespace - format is: "STATUS filename"
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                status_code, filename = parts
+                # Exclude translations and changelog
+                if '/locale/' not in filename and 'CHANGELOG.md' not in filename:
+                    code_changes.append(filename)
+        
+        if code_changes and check_remote_tag(repo_path, last_tag_full):
+            print(f"\n🚨 INCOMPLETE RELEASE DETECTED: {last_tag_full}")
+            print(f"   Tag exists on remote, but you have {len(code_changes)} uncommitted code changes")
+            print(f"   These changes should have been part of {last_tag_full}!")
+            print(f"\n   Files:")
+            for f in code_changes[:10]:
+                print(f"     - {f}")
+            if len(code_changes) > 10:
+                print(f"     ... and {len(code_changes)-10} more")
+            
+            print("\nWhat would you like to do?")
+            print(f"  1. FIX IT: Delete release/tag, commit changes, recreate {last_tag_full}")
+            print(f"  2. NEW RELEASE: Bump to next version and release these as new")
+            print(f"  3. EXIT")
+            
+            choice = input("\nChoice (1-3): ").strip()
+            
+            if choice == '1':
+                tag = last_tag_full
+                
+                # Step 1: Delete GitHub release
+                print(f"\n🗑️  Step 1/5: Deleting incomplete GitHub release...")
+                if shutil.which("gh"):
+                    subprocess.run(["gh", "release", "delete", tag, "-y"], cwd=repo_path, check=False)
+                    print(f"  ✓ Deleted release {tag}")
+                
+                # Step 2: Delete remote tag
+                print(f"\n🗑️  Step 2/5: Deleting remote tag...")
+                run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted remote tag")
+                
+                # Step 3: Delete local tag
+                print(f"\n🗑️  Step 3/5: Deleting local tag...")
+                run_git(["tag", "-d", tag], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted local tag")
+                
+                # Step 4: Commit changes (excluding translations)
+                print(f"\n📝 Step 4/5: Committing code changes...")
+                for f in code_changes:
+                    run_git(["add", f], cwd=repo_path)
+                run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
+                print(f"  ✓ Committed {len(code_changes)} files")
+                
+                # Step 5: Recreate and push
+                print(f"\n🚀 Step 5/5: Recreating {tag}...")
+                run_git(["push", "origin", "main"], cwd=repo_path)
+                run_git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=repo_path)
+                run_git(["push", "origin", tag], cwd=repo_path)
+                print(f"  ✓ Tag {tag} recreated and pushed")
+                
+                # Create GH release
+                if shutil.which("gh"):
+                    print(f"\n📝 Creating GitHub release...")
+                    notes = extract_changelog_section(repo_path, current_ver)
+                    if notes:
+                        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
+                            tf.write(notes)
+                            notes_file = tf.name
+                        subprocess.run(["gh", "release", "create", tag, "-F", notes_file, "-t", tag, "--draft", "--target", "main"], cwd=repo_path)
+                        os.unlink(notes_file)
+                        print(f"✅ Release {tag} fixed and published!")
+                return
+            
+            elif choice == '2':
+                # Fall through to bump logic
+                pass
+                
+            elif choice == '3':
+                sys.exit(0)
+
+    # Case 1.5: Missing GitHub Release (Post-Release Check)
+    # If we are sitting on a tag (current==last) but GH release is missing
+    if current_ver == last_ver and last_tag_full and shutil.which("gh"):
+        # Quick check if release exists (suppress output)
+        res = subprocess.run(
+            ["gh", "release", "view", last_tag_full], 
+            cwd=repo_path, 
+            capture_output=True
+        )
+        
+        if res.returncode != 0: # Release does not exist
+            print(f"\n⚠️  Tag {last_tag_full} exists, but GitHub Release is MISSING.")
+            print(f"   (You are currently on {current_ver})")
+            
+            print("\nWhat would you like to do?")
+            print(f"  1. 📝 DRAFT Release Notes for {last_tag_full} (Auto-extract from CHANGELOG)")
+            print(f"  2. 🔄 DELETE TAG & START OVER (Delete local+remote tag, redo release)")
+            print(f"  3. ⏭️  START NEXT Release (Bump version)")
+            print(f"  4. 🚪 EXIT")
+            
+            choice = input("\nChoice (1-4): ").strip()
+            
+            if choice == '1':
+                print(f"\nExtracting notes for {current_ver} from CHANGELOG.md...")
+                notes = extract_changelog_section(repo_path, current_ver)
+                
+                if not notes:
+                    print("   ! Changelog entry empty or not found.")
+                    if input("   Open editor to write manually? (y/n): ").lower() == 'y':
+                        notes = edit_notes(current_ver, "")
+                    else:
+                        return
+                else:
+                    print(f"   ✓ Found {len(notes.splitlines())} lines of notes")
+                
+                if notes:
+                    # Create release
+                    print(f"   Drafting release on GitHub...")
+                    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
+                        tf.write(notes)
+                        notes_file = tf.name
+                    
+                    try:
+                        subprocess.run(
+                            ["gh", "release", "create", last_tag_full, "-F", notes_file, "-t", last_tag_full, "--draft", "--target", "main"], 
+                            cwd=repo_path, 
+                            check=True
+                        )
+                        base_url = get_repo_url(repo_path)
+                        print(f"\n✅ Draft release created: {base_url}/releases/tag/{last_tag_full}")
+                    except subprocess.CalledProcessError:
+                        print(f"\n❌ Failed to create GH release. Ensure 'gh' is auth'd.")
+                    finally:
+                        if os.path.exists(notes_file): os.unlink(notes_file)
+                
+                # Loop back to refresh state
+                print("\n🔄 Refreshing state...")
+                return _main_logic(repo_path)
+                
+            elif choice == '2':
+                tag = last_tag_full
+                print(f"\n🔄 Resetting release state for {tag}...")
+                
+                # 1. Delete remote tag
+                run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted remote tag {tag}")
+                
+                # 2. Delete local tag
+                run_git(["tag", "-d", tag], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted local tag {tag}")
+                
+                # 3. Get the ACTUAL previous tag now that the current one is gone
+                # This ensures the changelog covers the correct range (PrevTag..HEAD)
+                prev_tag = get_last_tag(repo_path)
+                
+                print("\nRegenerating changelog from git history...")
+                draft = get_smart_changelog(repo_path, prev_tag, current_ver)
+                
+                # 4. Let user review/edit notes (Standard flow)
+                final_notes = edit_notes(current_ver, draft)
+                
+                write_changelog(repo_path, final_notes, current_ver)
+                perform_git_release(repo_path, current_ver)
+                return
+                
+            elif choice == '3':
+                # Fall through to bump logic below
+                pass
+                
+            elif choice == '4':
+                sys.exit(0)
+
+    # Case 2: Clean Slate (Normal Flow)
+    print(f"Current Version: {current_ver}")
+    print("\n[1] Patch  [2] Minor  [3] Major")
+    c = input("Bump type: ").strip()
+    
+    if c not in ['1', '2', '3']:
+        print("Invalid choice.")
+        return
+        
+    bump_type = {'1':'patch','2':'minor','3':'major'}[c]
+    
+    # Calculate new version
+    major, minor, patch = map(int, current_ver.split('.'))
+    if bump_type == 'major': new_ver = f"{major+1}.0.0"
+    elif bump_type == 'minor': new_ver = f"{major}.{minor+1}.0"
+    else: new_ver = f"{major}.{minor}.{patch+1}"
+    
+    print(f"\nTarget: {current_ver} -> {new_ver}")
+    
+    # Update TOML immediately
+    toml = repo_path / "pyproject.toml"
+    content = toml.read_text()
+    toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{new_ver}"', content, count=1, flags=re.MULTILINE))
+    print("✓ Updated pyproject.toml")
+    
+    # Changelog
+    draft = get_smart_changelog(repo_path, last_tag_full, new_ver)
+    final_notes = edit_notes(new_ver, draft)
+    write_changelog(repo_path, final_notes, new_ver)
+    
+    # Finish
+    perform_git_release(repo_path, new_ver)
+
+if __name__ == "__main__":
+    main_with_repo(Path.cwd())

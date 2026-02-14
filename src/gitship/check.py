@@ -2,7 +2,7 @@
 """
 checkgit - Interactive Git commit inspector and reverter.
 
-Displays the last 10 commits in a repository, allows inspection of file changes,
+Displays the last N commits in a repository, allows inspection of file changes,
 and provides an interactive workflow for reverting commits.
 """
 
@@ -31,20 +31,24 @@ class GitCraftLogger:
         error_file = log_dir / f"{name}_errors.log"
         
         # File handlers
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(logging.INFO)
-        
-        eh = logging.FileHandler(error_file)
-        eh.setLevel(logging.ERROR)
-        
-        # Formatter
-        formatter = logging.Formatter('%(asctime)s - %(message)s', 
-                                     datefmt='%Y-%m-%d %H:%M:%S')
-        fh.setFormatter(formatter)
-        eh.setFormatter(formatter)
-        
-        self.logger.addHandler(fh)
-        self.logger.addHandler(eh)
+        try:
+            fh = logging.FileHandler(log_file)
+            fh.setLevel(logging.INFO)
+            
+            eh = logging.FileHandler(error_file)
+            eh.setLevel(logging.ERROR)
+            
+            # Formatter
+            formatter = logging.Formatter('%(asctime)s - %(message)s', 
+                                         datefmt='%Y-%m-%d %H:%M:%S')
+            fh.setFormatter(formatter)
+            eh.setFormatter(formatter)
+            
+            self.logger.addHandler(fh)
+            self.logger.addHandler(eh)
+        except Exception:
+            # Continue without file logging if it fails
+            pass
     
     def info(self, message: str):
         """Log info message."""
@@ -135,21 +139,18 @@ def call_fixgit(repo_path: Path, commit_hash: str, logger: GitCraftLogger):
     """Call the fixgit command."""
     try:
         # Try to import fixgit module
-        from . import fixgit as fixgit_module
+        from . import fix as fix_module
         logger.info(f"User initiated revert of commit {commit_hash}")
-        fixgit_module.main_with_args(str(repo_path), commit_hash)
+        fix_module.main_with_args(str(repo_path), commit_hash)
     except ImportError:
         logger.error("fixgit module not found")
-        print("Error: fixgit is not available. Please ensure gitcraft is properly installed.")
+        print("Error: fixgit is not available. Please ensure gitship is properly installed.")
         sys.exit(1)
 
 
-def main():
-    """Main entry point for checkgit."""
-    # Auto-detect repo or use provided path
-    repo_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
-    
-    # Initialize logger
+def main_with_args(repo_path_str: str, count: int = 10):
+    """Main function with arguments for CLI integration."""
+    repo_path = Path(repo_path_str).resolve()
     logger = GitCraftLogger("checkgit")
     
     # Validate repo
@@ -158,17 +159,17 @@ def main():
         print(f"Error: Not in a git repository: {repo_path}")
         sys.exit(1)
     
-    logger.info(f"Checking last 10 commits in {repo_path}")
+    logger.info(f"Checking last {count} commits in {repo_path}")
     
     # Get branch name
     branch = get_branch_name(repo_path)
     
     # Display commits
     print()
-    print(f"=== Last 10 commits in {repo_path.name} (branch: {branch}) ===")
+    print(f"=== Last {count} commits in {repo_path.name} (branch: {branch}) ===")
     print()
     
-    commits_display = get_last_commits(repo_path)
+    commits_display = get_last_commits(repo_path, count)
     for i, commit_line in enumerate(commits_display, 1):
         print(f"{i:2d}\t{commit_line}")
     
@@ -176,7 +177,7 @@ def main():
     print()
     
     # Get commit hashes for processing
-    commit_hashes = get_commit_hashes(repo_path)
+    commit_hashes = get_commit_hashes(repo_path, count)
     
     if not commit_hashes:
         logger.error("No commits found.")
@@ -188,7 +189,7 @@ def main():
     
     if show_details in ('y', 'yes'):
         try:
-            detail_num = int(input("Enter commit number (1-10): ").strip())
+            detail_num = int(input(f"Enter commit number (1-{count}): ").strip())
             
             if 1 <= detail_num <= len(commit_hashes):
                 selected_hash = commit_hashes[detail_num - 1]
@@ -203,7 +204,7 @@ def main():
     
     if revert_choice in ('y', 'yes'):
         try:
-            commit_num = int(input("Enter the commit number to revert (1-10): ").strip())
+            commit_num = int(input(f"Enter the commit number to revert (1-{count}): ").strip())
             
             if 1 <= commit_num <= len(commit_hashes):
                 selected_hash = commit_hashes[commit_num - 1]
@@ -250,6 +251,18 @@ def main():
     else:
         logger.info("No revert requested")
         print("No changes made. Goodbye!")
+
+
+def main_with_repo(repo_path: Path):
+    """Main function for repo path (for menu integration)."""
+    main_with_args(str(repo_path), count=10)
+
+
+def main():
+    """Main entry point for checkgit standalone."""
+    # Auto-detect repo or use provided path
+    repo_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
+    main_with_args(str(repo_path), count=10)
 
 
 if __name__ == "__main__":

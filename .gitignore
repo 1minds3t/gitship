@@ -20,12 +20,11 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+PKGINFO
 
 # PyInstaller
 *.manifest
@@ -48,6 +47,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+cover/
 
 # Translations
 *.mo
@@ -70,6 +70,7 @@ instance/
 docs/_build/
 
 # PyBuilder
+.pybuilder/
 target/
 
 # Jupyter Notebook
@@ -84,6 +85,12 @@ ipython_config.py
 
 # pipenv
 Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
 
 # PEP 582
 __pypackages__/
@@ -122,7 +129,13 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# IDEs
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# IDE
 .vscode/
 .idea/
 *.swp
@@ -132,3 +145,7 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Gitship specific
+*.log
+test_file.txt

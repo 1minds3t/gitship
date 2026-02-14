@@ -310,6 +310,18 @@ def main_with_args(repo_path_str: str, commit_sha: str):
         restart_autopush_service(autopush_was_active, logger)
 
 
+def main_with_repo(repo_path: Path):
+    """Interactive mode for menu integration - prompts for commit SHA."""
+    print("Enter the commit SHA to revert to the state BEFORE this commit:")
+    commit_sha = input().strip()
+    
+    if not commit_sha:
+        print("ERROR: No commit SHA provided", file=sys.stderr)
+        sys.exit(1)
+    
+    main_with_args(str(repo_path), commit_sha)
+
+
 def main():
     """Main entry point for fixgit."""
     # Auto-detect repo or use provided path

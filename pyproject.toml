@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitship"
-version = "0.1.0"
-description = "Interactive Git history management and commit inspection tools"
+version = "0.3.0"
+description = "Interactive Git history management and commit inspection tools with comprehensive diff review"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "1minds3t", email = "1minds3t@proton.me"}
 ]
-keywords = ["git", "version-control", "cli", "history", "revert", "commit-inspection"]
+keywords = ["git", "version-control", "cli", "history", "revert", "commit-inspection", "diff", "review"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -45,8 +45,7 @@ Repository = "https://github.com/1minds3t/gitship"
 Issues = "https://github.com/1minds3t/gitship/issues"
 
 [project.scripts]
-checkgit = "gitship.checkgit:main"
-fixgit = "gitship.fixgit:main"
+gitship = "gitship.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
