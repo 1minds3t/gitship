@@ -14,6 +14,22 @@ from pathlib import Path
 from datetime import datetime
 from collections import Counter
 
+# --- ANSI COLORS ---
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_CYAN = '\033[96m'
+
 # --- GIT & SYSTEM HELPERS ---
 
 def run_git(args, cwd=None, check=True):
@@ -855,6 +871,18 @@ def _main_logic(repo_path: Path):
     print(f"\n⚓ GITSHIP RELEASE: {repo_path.name}")
     print("=" * 60)
     
+    # --- CRITICAL: Ensure PyPI workflow exists BEFORE doing anything else ---
+    # This prevents releasing without the ability to publish
+    from . import pypi
+    package_name = pypi.read_package_name(repo_path)
+    if package_name:
+        # Check/Create workflow silently or interactively based on existence
+        workflow_path = repo_path / ".github" / "workflows" / "publish.yml"
+        if not workflow_path.exists():
+            print(f"\n{Colors.YELLOW}⚠️  Missing PyPI publish workflow! Creating it now...{Colors.RESET}")
+            pypi.ensure_publish_workflow(repo_path, package_name)
+            # If created, it's already staged by ensure_publish_workflow
+    
     # CRITICAL: Check if already in rebase/merge state FIRST
     git_dir = repo_path / ".git"
     in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
@@ -1320,8 +1348,14 @@ def _main_logic(repo_path: Path):
                 
                 # Step 4: Commit changes (excluding translations)
                 print(f"\n📝 Step 4/5: Committing code changes...")
+                
+                # Ensure publish.yml is included if it was just created/staged
+                if (repo_path / ".github" / "workflows" / "publish.yml").exists():
+                    run_git(["add", ".github/workflows/publish.yml"], cwd=repo_path)
+
                 for f in code_changes:
                     run_git(["add", f], cwd=repo_path)
+                
                 run_git(["commit", "-m", f"feat: complete {tag} release with all code changes"], cwd=repo_path)
                 print(f"  ✓ Committed {len(code_changes)} files")
                 
