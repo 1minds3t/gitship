@@ -132,9 +132,9 @@ def extract_changelog_section(repo_path: Path, version: str) -> str:
     if not cl_path.exists(): return ""
     content = cl_path.read_text()
     
-    # Match "## [version]" ... until next "## [" or End of File
-    # Robustly handles dates: "## [2.2.2] - 2024..." or just "## [2.2.2]"
-    pattern = rf"## \[(?:{re.escape(version)}|{re.escape(version)} )[^\]]*\].*?\n(.*?)(?=\n## \[|$)"
+    # Match "## [0.2.2] — 2026-02-14" (with em dash)
+    # Capture everything until next ## or end of file
+    pattern = rf"## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## \[|\Z)"
     match = re.search(pattern, content, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -1283,17 +1283,22 @@ def _main_logic(repo_path: Path):
             if len(code_changes) > 10:
                 print(f"     ... and {len(code_changes)-10} more")
             
-            # Check if already on PyPI
+            # Check if THIS VERSION already on PyPI
             from . import pypi
             package_name = pypi.read_package_name(repo_path)
             on_pypi = False
             if package_name:
-                pypi_status = pypi.check_pypi_status(package_name)
-                if pypi_status == 'exists':
-                    on_pypi = True
-                    print(f"\n{Colors.RED}⚠️  CRITICAL: Package already published on PyPI!{Colors.RESET}")
-                    print(f"   Cannot modify {last_tag_full} - PyPI is immutable")
-                    print(f"   You MUST bump to next version")
+                # Check if this specific version exists
+                try:
+                    import requests
+                    resp = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        # Strip 'v' prefix if present
+                        check_ver = current_ver.lstrip('v')
+                        on_pypi = check_ver in data.get('releases', {})
+                except:
+                    on_pypi = False
             
             print("\nWhat would you like to do?")
             if on_pypi:
