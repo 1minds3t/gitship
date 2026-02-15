@@ -269,23 +269,28 @@ def create_github_environment(repo_path: Path, owner: str, repo_name: str, env_n
     result = run_command(['gh', '--version'])
     if result.returncode != 0:
         print(f"{Colors.YELLOW}⚠ GitHub CLI not found - skipping auto-creation{Colors.RESET}")
+        print(f"{Colors.DIM}   Manual setup: https://github.com/{owner}/{repo_name}/settings/environments/new{Colors.RESET}")
         return False
     
-    # Create environment with minimal settings (no deployment protection)
+    # Create environment - use exact command that worked
     result = run_command([
         'gh', 'api',
         '--method', 'PUT',
         '-H', 'Accept: application/vnd.github+json',
-        f'/repos/{owner}/{repo_name}/environments/{env_name}',
-        '-f', 'wait_timer=0',
-        '-F', 'prevent_self_review=false'
+        '-H', 'X-GitHub-Api-Version: 2022-11-28',
+        f'/repos/{owner}/{repo_name}/environments/{env_name}'
     ], cwd=repo_path)
+    
+    print(f"[DEBUG] gh api exit code: {result.returncode}")
+    print(f"[DEBUG] stdout: {result.stdout[:200] if result.stdout else 'EMPTY'}")
+    print(f"[DEBUG] stderr: {result.stderr[:200] if result.stderr else 'EMPTY'}")
     
     if result.returncode == 0:
         print(f"{Colors.GREEN}✓ Created GitHub environment '{env_name}'{Colors.RESET}")
         return True
     else:
-        print(f"{Colors.YELLOW}⚠ Could not auto-create environment (may already exist){Colors.RESET}")
+        print(f"{Colors.YELLOW}⚠ Could not auto-create environment{Colors.RESET}")
+        print(f"{Colors.DIM}   Manual setup: https://github.com/{owner}/{repo_name}/settings/environments/new{Colors.RESET}")
         return False
 
 
