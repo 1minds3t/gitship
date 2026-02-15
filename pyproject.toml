@@ -29,9 +29,13 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 
-dependencies = []
+dependencies = [
+    "requests",
+    "tomli",
+]
 
 [project.optional-dependencies]
+full = ["omnipkg"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

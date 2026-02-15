@@ -556,6 +556,7 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         guide_trusted_publisher_setup(repo_path, package_name, username)
     
     # Check if release already exists
+    # Check if release already exists
     release_status = check_existing_release(repo_path, version)
     
     if release_status == 'draft':
@@ -564,25 +565,26 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         
         if publish_now == 'y':
             publish_draft_release(repo_path, version)
+            # DONE - workflow will trigger automatically
+            print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
+            print(f"{Colors.GREEN}PyPI publishing preparation complete!{Colors.RESET}")
+            print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
+            return
+        else:
+            print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
+            print(f"   gh release edit {version} --draft=false")
+            print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
+            print(f"{Colors.GREEN}PyPI publishing preparation complete!{Colors.RESET}")
+            print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
+            return
     
     elif release_status == 'published':
         print(f"\n{Colors.GREEN}✓ Release {version} already published{Colors.RESET}")
-        
-    # Publishing options (skip if we just published)
-    if release_status != 'draft' or publish_now != 'y':
-        print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
-
-        print(f"[DEBUG] Checking workflow_exists: {workflow_exists}")
-        if workflow_exists:
-            print(f"\n{Colors.CYAN}With GitHub Actions workflow:{Colors.RESET}")
-            print("  • When you PUBLISH the GitHub release, the workflow will:")
-            print("    1. Build the package")
-            if method == "oidc":
-                print("    2. Publish to PyPI automatically (via OIDC)")
-            else:
-                print("    2. Publish to PyPI automatically (via API token)")
-            print(f"    3. Package will be live at: https://pypi.org/project/{package_name}/")
-            print(f"\n{Colors.GREEN}✓ All set! Just publish the release when ready.{Colors.RESET}")
+        print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
+        print(f"{Colors.GREEN}PyPI publishing preparation complete!{Colors.RESET}")
+        print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
+        return
+    
     else:
         print(f"\n{Colors.YELLOW}⚠ No workflow configured{Colors.RESET}")
         offer_manual_publish(repo_path)

@@ -14,6 +14,17 @@ from pathlib import Path
 from datetime import datetime
 from collections import Counter
 
+# Try to import changelog_generator for better changelog generation
+try:
+    from gitship.changelog_generator import (
+        generate_detailed_changelog,
+        analyze_uncommitted_changes,
+        GITSHIP_COMMIT_MARKER
+    )
+    CHANGELOG_GENERATOR_AVAILABLE = True
+except ImportError:
+    CHANGELOG_GENERATOR_AVAILABLE = False
+
 # --- ANSI COLORS ---
 class Colors:
     RESET = '\033[0m'
@@ -144,7 +155,18 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
     """
     Generate changelog with proper title, grouped commits, and duplicate counting.
     Returns (draft_content, suggested_title)
+    
+    Now uses the shared changelog_generator module for better analysis when available.
     """
+    # Use the new detailed changelog generator if available
+    if CHANGELOG_GENERATOR_AVAILABLE:
+        try:
+            return generate_detailed_changelog(repo_path, last_tag, new_version)
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠ Advanced changelog generation failed: {e}{Colors.RESET}")
+            print(f"{Colors.DIM}Falling back to basic changelog...{Colors.RESET}")
+    
+    # FALLBACK: Basic implementation
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
     
     # Get file stats
@@ -804,6 +826,37 @@ def _main_logic(repo_path: Path):
     print(f"\n⚓ GITSHIP RELEASE: {repo_path.name}")
     print("=" * 60)
     
+    # Check for uncommitted changes FIRST
+    if CHANGELOG_GENERATOR_AVAILABLE:
+        changes = analyze_uncommitted_changes(repo_path)
+        if changes and changes['total'] > 0:
+            print(f"\n{Colors.YELLOW}⚠️  Uncommitted Changes Detected!{Colors.RESET}")
+            print(f"   Staged: {len(changes['staged'])} files")
+            print(f"   Unstaged: {len(changes['unstaged'])} files")
+            print(f"   Untracked: {len(changes['untracked'])} files")
+            print(f"\n{Colors.BOLD}Recommendation:{Colors.RESET} Commit changes before releasing for better changelog.")
+            print("\nOptions:")
+            print(f"  1. {Colors.GREEN}COMMIT NOW{Colors.RESET} - Use 'gitship commit' to create detailed commit")
+            print(f"  2. {Colors.YELLOW}CONTINUE ANYWAY{Colors.RESET} - Release without committing (not recommended)")
+            print(f"  3. {Colors.RED}CANCEL{Colors.RESET} - Exit and commit manually")
+            
+            choice = input("\nChoice (1-3): ").strip()
+            
+            if choice == '1':
+                # Run the commit tool
+                print(f"\n{Colors.CYAN}Launching commit tool...{Colors.RESET}\n")
+                try:
+                    from gitship import commit as commit_module
+                    commit_module.main_with_repo(repo_path)
+                    print(f"\n{Colors.GREEN}Returning to release process...{Colors.RESET}\n")
+                except Exception as e:
+                    print(f"{Colors.RED}Error running commit tool: {e}{Colors.RESET}")
+                    return
+            elif choice == '3':
+                print("Release cancelled.")
+                return
+            # If choice == '2', continue with uncommitted changes
+    
     # --- CRITICAL: Ensure PyPI workflow exists BEFORE doing anything else ---
     # This prevents releasing without the ability to publish
     from . import pypi
@@ -1291,13 +1344,21 @@ def _main_logic(repo_path: Path):
                 # Check if this specific version exists
                 try:
                     import requests
+                    # Get the version without 'v' prefix
+                    check_ver = current_ver.lstrip('v') if current_ver.startswith('v') else current_ver
+                    # Also try the tag format
+                    tag_ver = last_tag_full.lstrip('v') if last_tag_full and last_tag_full.startswith('v') else last_tag_full
+                    
                     resp = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
                     if resp.status_code == 200:
                         data = resp.json()
-                        # Strip 'v' prefix if present
-                        check_ver = current_ver.lstrip('v')
-                        on_pypi = check_ver in data.get('releases', {})
-                except:
+                        releases = data.get('releases', {})
+                        # Check both current_ver and tag format
+                        on_pypi = check_ver in releases or tag_ver in releases
+                        if on_pypi:
+                            print(f"[DEBUG] Found {check_ver} or {tag_ver} in PyPI releases: {list(releases.keys())[-5:]}")
+                except Exception as e:
+                    print(f"[DEBUG] PyPI check failed: {e}")
                     on_pypi = False
             
             print("\nWhat would you like to do?")

@@ -1315,6 +1315,9 @@ def interactive_commit(analyzer: ChangeAnalyzer):
         return False
     
     if confirm in ('y', 'yes'):
+        # Add gitship marker to message
+        marked_message = f"{message}\n\n[gitship-generated]"
+        
         # Stage all changes
         result = analyzer.run_git(["add", "-A"])
         if result.returncode != 0:
@@ -1322,7 +1325,7 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             return False
         
         # Commit
-        result = analyzer.run_git(["commit", "-m", message])
+        result = analyzer.run_git(["commit", "-m", marked_message])
         if result.returncode != 0:
             print(f"Error committing: {result.stderr}")
             return False

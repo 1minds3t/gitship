@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
 try:
     from gitship import check, fix, review, release, commit, branch, publish
     from gitship.config import load_config, get_default_export_path
@@ -37,11 +38,12 @@ def show_menu(repo_path: Path):
     print("  6. config   - View/edit gitship configuration")
     print("  7. branch   - Manage branches (create, switch, rename, set default)")
     print("  8. publish  - Create GitHub repo and push (with identity verification)")
+    print("  9. deps     - Scan for and add missing dependencies to pyproject.toml")
     print("  0. exit     - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-8): ").strip()
+        choice = input("Enter your choice (0-9): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -73,6 +75,9 @@ def show_menu(repo_path: Path):
     elif choice == "8":
         from gitship import publish
         publish.main_with_repo(repo_path)
+    elif choice == "9":
+        from gitship import deps
+        deps.main_with_repo(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -90,17 +95,22 @@ def main():
 Examples:
   gitship                          # Interactive menu in current directory
   gitship --menu                   # Interactive menu in current directory
-  gitship checkgit                 # Run checkgit in current directory
-  gitship fixgit a1b2c3d           # Restore files from before commit a1b2c3d
-  gitship reviewgit                # Review changes between HEAD and last tag
-  gitship reviewgit --from v1.0.0 --to v2.0.0  # Review changes between tags
-  gitship reviewgit --export       # Export full diff to file
-  gitship -r ~/myproject checkgit  # Run checkgit in specific repo
+  gitship check                    # Run check in current directory
+  gitship fix a1b2c3d              # Restore files from before commit a1b2c3d
+  gitship review                   # Review changes between HEAD and last tag
+  gitship review --from v1.0.0 --to v2.0.0  # Review changes between tags
+  gitship review --export          # Export full diff to file
+  gitship -r ~/myproject check     # Run check in specific repo
 
 Commands:
-  checkgit   - View recent commits, inspect changes, and revert
-  fixgit     - Selectively restore files from commit history
-  reviewgit  - Review changes between tags/commits with export options
+  check      - View recent commits, inspect changes, and revert
+  fix        - Selectively restore files from commit history
+  review     - Review changes between tags/commits with export options
+  release    - Interactive release creator
+  commit     - Smart commit with change analysis
+  branch     - Interactive branch management
+  publish    - Publish repository to GitHub
+  deps       - Scan and add missing dependencies
   config     - View configuration settings
         """
     )
@@ -126,25 +136,25 @@ Commands:
     
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # checkgit subcommand
-    checkgit_parser = subparsers.add_parser(
-        'checkgit',
+        
+        # check subcommand
+    check_parser = subparsers.add_parser(
+        'check',
         help='View recent commits and inspect changes'
     )
-    checkgit_parser.add_argument(
+    check_parser.add_argument(
         '-n', '--count',
         type=int,
         default=10,
         help='Number of commits to show (default: 10)'
     )
-    
-    # fixgit subcommand
-    fixgit_parser = subparsers.add_parser(
-        'fixgit',
+
+    # fix subcommand
+    fix_parser = subparsers.add_parser(
+        'fix',
         help='Selectively restore files from commit history'
     )
-    fixgit_parser.add_argument(
+    fix_parser.add_argument(
         'commit',
         nargs='?',
         help='Commit SHA to restore files from (before this commit)'
@@ -158,35 +168,35 @@ Commands:
         type=str,
         help='Commit message (skip interactive prompt)'
     )
-    # reviewgit subcommand
-    reviewgit_parser = subparsers.add_parser(
-        'reviewgit',
+    # review subcommand
+    review_parser = subparsers.add_parser(
+        'review',
         help='Review changes between tags/commits with export options'
     )
-    reviewgit_parser.add_argument(
+    review_parser.add_argument(
         '--from',
         dest='from_ref',
         type=str,
         help='Starting reference (tag/commit/branch). Default: last tag'
     )
-    reviewgit_parser.add_argument(
+    review_parser.add_argument(
         '--to',
         dest='to_ref',
         type=str,
         default='HEAD',
         help='Ending reference (tag/commit/branch). Default: HEAD'
     )
-    reviewgit_parser.add_argument(
+    review_parser.add_argument(
         '--export',
         action='store_true',
         help='Export full diff to file'
     )
-    reviewgit_parser.add_argument(
+    review_parser.add_argument(
         '--export-path',
         type=str,
         help='Custom export path (default: from config or ~/omnipkg_git_cleanup)'
     )
-    reviewgit_parser.add_argument(
+    review_parser.add_argument(
         '--stat-only',
         action='store_true',
         help='Show only diff stats, not full commit messages'
@@ -285,7 +295,11 @@ Commands:
         type=str,
         help='GitHub username to publish as (skip interactive selection)'
     )
-    
+    # deps subcommand
+    deps_parser = subparsers.add_parser(
+        'deps',
+        help='Scan for and add missing dependencies to pyproject.toml'
+    )
     args = parser.parse_args()
     
     # Determine repository path
@@ -300,16 +314,19 @@ Commands:
         sys.exit(1)
     
     # Handle commands
-    if args.command == 'checkgit':
+    if args.command == 'check':
         check.main_with_args(str(repo_path), count=args.count)
     
-    elif args.command == 'fixgit':
+    elif args.command == 'fix':
         if args.commit:
             fix.main_with_args(str(repo_path), args.commit)
         else:
             fix.main_with_repo(repo_path)
     
-    elif args.command == 'reviewgit':
+    elif args.command == 'commit':
+        commit.main_with_repo(repo_path)
+    
+    elif args.command == 'review':
         review.main_with_args(
             repo_path=repo_path,
             from_ref=args.from_ref,
@@ -346,6 +363,9 @@ Commands:
     elif args.command == 'publish':
         from gitship import publish
         publish.publish_repository(repo_path)
+    elif args.command == 'deps':
+        from gitship import deps
+        deps.main_with_repo(repo_path)
         
     else:
         # No command specified, show menu
