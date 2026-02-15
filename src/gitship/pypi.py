@@ -585,8 +585,28 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
         return
     
+    elif release_status == 'none':
+        # No release exists - create one
+        if workflow_exists:
+            print(f"\n{Colors.CYAN}Creating GitHub release...{Colors.RESET}")
+            success = create_github_release_draft(repo_path, version, changelog, package_name)
+            
+            if success:
+                print(f"\n{Colors.GREEN}✅ Draft release created!{Colors.RESET}")
+                print(f"\n{Colors.CYAN}Next steps:{Colors.RESET}")
+                print(f"  1. Review the release at: https://github.com/{{owner}}/{{repo}}/releases")
+                print(f"  2. Publish it to trigger PyPI workflow")
+                print(f"  3. Or publish now with: gh release edit {version} --draft=false")
+            else:
+                print(f"\n{Colors.YELLOW}⚠ Failed to create release{Colors.RESET}")
+                offer_manual_publish(repo_path)
+        else:
+            print(f"\n{Colors.YELLOW}⚠ No workflow configured{Colors.RESET}")
+            offer_manual_publish(repo_path)
+    
     else:
-        print(f"\n{Colors.YELLOW}⚠ No workflow configured{Colors.RESET}")
+        # Unknown status
+        print(f"\n{Colors.YELLOW}⚠ Unknown release status: {release_status}{Colors.RESET}")
         offer_manual_publish(repo_path)
     
     print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
