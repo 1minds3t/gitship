@@ -47,27 +47,33 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
     
-    # Get commit SHAs and subjects
+    # Get commit SHAs and subjects - use %B for full message
     log_output = run_git([
         "log", range_str, 
-        "--pretty=format:%H|||%s|||%b",
+        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
         "--no-merges"  # We'll handle merges separately
     ], repo_path)
     
     commits = []
     seen_messages = set()
     
-    for line in log_output.split('\n'):
-        if not line.strip():
+    # Split by END_COMMIT marker to handle multi-line bodies
+    for commit_block in log_output.split('|||END_COMMIT'):
+        if not commit_block.strip():
             continue
             
-        parts = line.split('|||')
-        if len(parts) < 2:
+        parts = commit_block.split('|||')
+        if len(parts) < 3:
             continue
             
-        sha = parts[0]
+        sha = parts[0].strip()
         subject = parts[1].strip()
-        body = parts[2].strip() if len(parts) > 2 else ""
+        full_message = parts[2].strip() if len(parts) > 2 else ""
+        
+        # Body is everything after the subject line in the full message
+        # The full message (%B) includes subject + blank line + body
+        body_parts = full_message.split('\n', 1)
+        body = body_parts[1].strip() if len(body_parts) > 1 else ""
         
         # Skip noise
         if any(phrase in subject.lower() for phrase in [
@@ -82,12 +88,13 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
         seen_messages.add(subject)
         
         # Check if gitship-generated
-        is_gitship = GITSHIP_COMMIT_MARKER in body
+        is_gitship = GITSHIP_COMMIT_MARKER in body or GITSHIP_COMMIT_MARKER in full_message
         
         commits.append({
             'sha': sha,
             'subject': subject,
             'body': body,
+            'full_message': full_message,
             'is_gitship': is_gitship,
             'is_merge': False
         })
@@ -95,21 +102,24 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
     # Also get merge commits (they often have detailed info)
     merge_log = run_git([
         "log", range_str,
-        "--pretty=format:%H|||%s|||%b",
+        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
         "--merges"
     ], repo_path)
     
-    for line in merge_log.split('\n'):
-        if not line.strip():
+    for commit_block in merge_log.split('|||END_COMMIT'):
+        if not commit_block.strip():
             continue
             
-        parts = line.split('|||')
-        if len(parts) < 2:
+        parts = commit_block.split('|||')
+        if len(parts) < 3:
             continue
             
-        sha = parts[0]
+        sha = parts[0].strip()
         subject = parts[1].strip()
-        body = parts[2].strip() if len(parts) > 2 else ""
+        full_message = parts[2].strip() if len(parts) > 2 else ""
+        
+        body_parts = full_message.split('\n', 1)
+        body = body_parts[1].strip() if len(body_parts) > 1 else ""
         
         # Extract useful info from merge commits
         if "Merge pull request" in subject or "Merge branch" in subject:
@@ -119,6 +129,7 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
                     'sha': sha,
                     'subject': body.split('\n')[0] if body else subject,
                     'body': body,
+                    'full_message': full_message,
                     'is_gitship': False,
                     'is_merge': True
                 })
@@ -173,24 +184,36 @@ def extract_file_changes_from_gitship_commit(commit_body: str) -> List[str]:
     - Renames:
     """
     lines = []
-    in_section = False
+    current_section = None
+    skip_next_empty = False
     
     for line in commit_body.split('\n'):
+        original_line = line
         line = line.strip()
         
-        # Detect section headers
-        if line.endswith(':') and line in ['New files:', 'Modified:', 'Renames:']:
-            in_section = True
+        # Skip the marker line
+        if GITSHIP_COMMIT_MARKER in line:
+            break
+        
+        # Detect section headers (any line ending with : that looks like a section)
+        if line.endswith(':') and any(keyword in line for keyword in ['New files', 'Modified', 'Renames', 'Translations']):
+            current_section = line
             lines.append(f"**{line}**")
+            skip_next_empty = False
             continue
         
-        # If we're in a section and line starts with bullet
-        if in_section and line.startswith('•'):
-            lines.append(f"- {line[1:].strip()}")
-        elif in_section and not line:
-            in_section = False
-        elif not in_section and line and not line.startswith(GITSHIP_COMMIT_MARKER):
-            # This might be a title line
+        # If we're in a section and line starts with bullet (• or -)
+        if current_section and (line.startswith('•') or line.startswith('-')):
+            # Remove the bullet and any leading whitespace
+            content = line.lstrip('•-').strip()
+            lines.append(f"- {content}")
+            skip_next_empty = False
+        elif current_section and not line:
+            # Empty line might end the section, but don't add it to output
+            if not skip_next_empty:
+                current_section = None
+        elif not current_section and line and not line.startswith('Update'):
+            # This might be a title/summary line before sections - skip it
             pass
     
     return lines
@@ -210,6 +233,9 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     """
     commits = get_detailed_commits_since_tag(repo_path, last_tag)
     
+    # DEBUG: Show what commits we found
+    print(f"[DEBUG] Found {len(commits)} commits since {last_tag}")
+    
     # Get file statistics
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
     stats = run_git(["diff", "--shortstat", range_str], repo_path)
@@ -221,10 +247,15 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     gitship_commits = [c for c in commits if c['is_gitship']]
     other_commits = [c for c in commits if not c['is_gitship']]
     
+    print(f"[DEBUG] Gitship commits: {len(gitship_commits)}, Other: {len(other_commits)}")
+    
     # If we have detailed gitship commits, use their structured info
     if gitship_commits:
         # Use the most recent gitship commit's body as the primary source
         primary_commit = gitship_commits[0]
+        
+        print(f"[DEBUG] Primary gitship commit subject: {primary_commit['subject']}")
+        print(f"[DEBUG] Body preview (first 200 chars): {primary_commit['body'][:200]}")
         
         # Extract the title from the commit subject
         if ':' in primary_commit['subject']:
@@ -234,8 +265,15 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
         
         # Extract structured file changes
         file_changes = extract_file_changes_from_gitship_commit(primary_commit['body'])
+        print(f"[DEBUG] Extracted {len(file_changes)} file change lines")
+        
         if file_changes:
             changelog_lines.extend(file_changes)
+            changelog_lines.append("")
+        else:
+            # Fallback: if extraction failed, show the commit subject at least
+            print(f"[DEBUG] No file changes extracted, using commit subject")
+            changelog_lines.append(f"- {primary_commit['subject']}")
             changelog_lines.append("")
         
         # Add other gitship commits if they exist

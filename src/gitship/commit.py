@@ -80,6 +80,7 @@ class ChangeAnalyzer:
         
         print(f"\n[DEBUG] Raw git status output:")
         print(result.stdout)
+        print(f"[DEBUG] Parsing {len(result.stdout.strip().split(chr(10)))} lines")
         print()
         
         all_files = []
@@ -87,11 +88,24 @@ class ChangeAnalyzer:
         untracked_files = []
         git_detected_renames = []
         
-        for line in result.stdout.strip().split('\n'):
+        # Split lines WITHOUT stripping first (preserves leading spaces in status codes)
+        for line in result.stdout.split('\n'):
+            # Only strip trailing whitespace from each line
+            line = line.rstrip()
             if not line:
                 continue
-            status = line[:2].strip()
-            filepath = line[3:].strip()
+            
+            # Git status --porcelain format: "XY filename"
+            # where X and Y are status codes (or spaces)
+            # The filename starts at position 3 (after 2 status chars + 1 space)
+            if len(line) < 4:
+                continue
+                
+            status = line[:2]  # Keep the raw status (may include spaces)
+            filepath = line[3:]  # Start after "XY " - NO strip here, we already rstripped
+            
+            # Clean up status for comparison (remove spaces)
+            status_clean = status.strip()
             
             # Check for git-detected renames (status R or R100, etc.)
             if status.startswith('R'):
@@ -104,7 +118,8 @@ class ChangeAnalyzer:
             
             all_files.append({'status': status, 'path': filepath})
             
-            if status == 'D':
+            # Use status_clean for comparisons (without spaces)
+            if status_clean == 'D':
                 deleted_files.append(filepath)
             elif status == '??':
                 untracked_files.append(filepath)
@@ -550,13 +565,14 @@ class CommitMessageBuilder:
         # Add modified files (ALL of them, no limit)
         modified_files = []
         for item in changes['code']:
-            if item['status'] in ('M', 'MM') and 'rename_from' not in item:
+            # Status can be " M", "M ", "MM", etc - check if M is present
+            if 'M' in item['status'] and 'rename_from' not in item:
                 modified_files.append(item)
         for item in changes['config']:
-            if item['status'] in ('M', 'MM'):
+            if 'M' in item['status']:
                 modified_files.append(item)
         for item in changes['docs']:
-            if item['status'] in ('M', 'MM'):
+            if 'M' in item['status']:
                 modified_files.append(item)
         
         if modified_files:
@@ -1208,7 +1224,8 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             if 'rename_from' in item:
                 print(f"  • {item['path']} (renamed from {item['rename_from']})")
             else:
-                status_name = "modified" if item['status'] == 'M' else "new"
+                # Status can be " M", "M ", "MM", etc - check if M is present
+                status_name = "modified" if 'M' in item['status'] else "new"
                 print(f"  • {item['path']} ({status_name})")
         if len(analyzer.changes['code']) > 5:
             print(f"  {Colors.DIM}... and {len(analyzer.changes['code']) - 5} more{Colors.RESET}")
