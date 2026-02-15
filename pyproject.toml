@@ -1,7 +1,7 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
+ 
 [project]
 name = "gitship"
 version = "0.2.2"

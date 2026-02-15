@@ -435,14 +435,47 @@ def create_github_release_draft(repo_path: Path, tag: str, changelog: str, packa
     # Get owner and repo from git remote
     owner, repo = get_github_repo_info(repo_path)
     
+    # Build release title
+    title = f'{package_name} {tag}' if package_name else tag
+    
+    # DEBUG: Show what we're creating
+    print(f"[DEBUG] Creating release:")
+    print(f"[DEBUG]   Tag: {tag}")
+    print(f"[DEBUG]   Title: {title}")
+    print(f"[DEBUG]   Changelog length: {len(changelog)}")
+    print(f"[DEBUG]   Changelog preview: {changelog[:200] if changelog else 'EMPTY'}")
+    
     # Create release draft
     result = run_command([
         'gh', 'release', 'create',
         tag,
         '--draft',
-        '--title', f'{package_name} {tag}',
-        '--notes', changelog
+        '--title', title,
+        '--notes', changelog if changelog else f"Release {tag}"
     ], cwd=repo_path, capture_output=False)
+    
+    if result.returncode == 0:
+        print(f"{Colors.GREEN}✅ Draft release created successfully{Colors.RESET}")
+        
+        # Wait for GitHub to process
+        import time
+        print(f"{Colors.DIM}Waiting for GitHub to process...{Colors.RESET}")
+        time.sleep(2)
+        
+        # Verify it was created
+        verify = run_command(['gh', 'release', 'view', tag], cwd=repo_path)
+        if verify.returncode == 0:
+            print(f"{Colors.GREEN}✅ Release verified{Colors.RESET}")
+            return True
+        else:
+            print(f"{Colors.YELLOW}⚠ Release created but verification failed{Colors.RESET}")
+            return True  # Still return True since creation succeeded
+    else:
+        print(f"{Colors.RED}✗ Failed to create release{Colors.RESET}")
+        print(f"[DEBUG] Return code: {result.returncode}")
+        print(f"[DEBUG] stdout: {result.stdout}")
+        print(f"[DEBUG] stderr: {result.stderr}")
+        return False
 
 
 def offer_manual_publish(repo_path: Path):
