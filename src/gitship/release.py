@@ -213,14 +213,15 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
     
     # Generate a suggested title based on the most significant change
     suggested_title = ""
+    # Determine suggested title based on what changed
     if features:
-        suggested_title = features[0].split(":", 1)[-1].strip()
+        suggested_title = features[0].split(':', 1)[1].strip() if ':' in features[0] else "New features and improvements"
     elif fixes:
-        suggested_title = fixes[0].split(":", 1)[-1].strip()
-    elif other:
-        suggested_title = other[0]
+        suggested_title = "Bug fixes and improvements"
+    elif updates:
+        suggested_title = "Code updates and improvements"
     else:
-        suggested_title = "Maintenance release"
+        suggested_title = f"Release v{new_version}"
 
     # Add main description sections
     if features:
@@ -276,7 +277,7 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
     print(f"{Colors.DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}")
     
     # Build prefix (what's automatic)
-    prefix = f"{pkg_name} {new_ver}" if pkg_name else new_ver
+    prefix = f"{pkg_name} v{new_ver}" if pkg_name else f"v{new_ver}"
     
     # Show what's automatic vs what user adds
     print(f"\n{Colors.CYAN}Auto prefix:{Colors.RESET} {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET}")
@@ -1154,19 +1155,32 @@ def _main_logic(repo_path: Path):
             return
     
     # Case 1: Version bumped but not tagged (In Progress)
+    # Case 1: Version bumped but not tagged (In Progress)
     if current_ver != last_ver and current_ver > last_ver:
         print(f"⚠️  RELEASE IN PROGRESS DETECTED")
         print(f"   TOML Version: {current_ver}")
         print(f"   Git Tag:      {last_tag_full}")
         print(f"   Local Changes: {'Yes' if is_dirty(repo_path) else 'No'}")
         
-        print("\nWhat would you like to do?")
-        print(f"  1. RESUME:  Commit, Tag & Push {current_ver} (Use current changelog)")
-        print(f"  2. REFRESH: Regenerate Changelog & Release {current_ver} (If you added more commits)")
-        print(f"  3. ABORT:   Revert TOML to {last_ver} and exit")
-        print(f"  4. RESET:   Reset version to match latest tag")
+        # Check if changelog exists for current version
+        changelog_exists = bool(extract_changelog_section(repo_path, current_ver))
         
-        choice = input("\nChoice (1-4): ").strip()
+        print("\nWhat would you like to do?")
+        if changelog_exists:
+            print(f"  1. RESUME:  Commit, Tag & Push {current_ver} (Use current changelog)")
+            print(f"  2. REFRESH: Regenerate Changelog & Release {current_ver} (If you added more commits)")
+            print(f"  3. ABORT:   Revert TOML to {last_ver} and exit")
+            print(f"  4. RESET:   Reset version to match latest tag")
+            choice = input("\nChoice (1-4): ").strip()
+        else:
+            print(f"  1. REFRESH: Regenerate Changelog & Release {current_ver}")
+            print(f"  2. ABORT:   Revert TOML to {last_ver} and exit")
+            print(f"  3. RESET:   Reset version to match latest tag")
+            choice = input("\nChoice (1-3): ").strip()
+            # Remap choices
+            if choice == '1': choice = '2'
+            elif choice == '2': choice = '3'
+            elif choice == '3': choice = '4'
         
         if choice == '1':
             perform_git_release(repo_path, current_ver)
