@@ -413,6 +413,45 @@ def guide_trusted_publisher_setup(repo_path: Path, package_name: str, username: 
             print(f"{Colors.YELLOW}Please enter 'y' or 'n'{Colors.RESET}")
 
 
+def check_existing_release(repo_path: Path, version: str) -> str:
+    """
+    Check if a release already exists for this version.
+    
+    Returns:
+        'published' - Release exists and is published
+        'draft' - Release exists as draft
+        'none' - No release exists
+    """
+    result = run_command(['gh', 'release', 'view', version], cwd=repo_path)
+    
+    if result.returncode != 0:
+        return 'none'
+    
+    # Check if it's a draft
+    if '--draft' in result.stdout or 'draft' in result.stdout.lower():
+        return 'draft'
+    
+    return 'published'
+
+
+def publish_draft_release(repo_path: Path, version: str) -> bool:
+    """
+    Publish an existing draft release.
+    
+    Returns True if successful.
+    """
+    print(f"\n{Colors.CYAN}Publishing draft release {version}...{Colors.RESET}")
+    
+    result = run_command(['gh', 'release', 'edit', version, '--draft=false'], cwd=repo_path, capture_output=False)
+    
+    if result.returncode == 0:
+        print(f"{Colors.GREEN}🚀 Release published! PyPI workflow triggered.{Colors.RESET}")
+        return True
+    else:
+        print(f"{Colors.RED}✗ Failed to publish release{Colors.RESET}")
+        return False
+
+
 def create_github_release_draft(repo_path: Path, tag: str, changelog: str, package_name: str) -> bool:
     """
     Create a GitHub release draft using gh CLI.
@@ -561,31 +600,43 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
     if first_release and method == "oidc":
         guide_trusted_publisher_setup(repo_path, package_name, username)
     
-    # Create GitHub release draft
-    print(f"\n{Colors.CYAN}GitHub Release Options:{Colors.RESET}")
-    print("  1. Create release draft (recommended - lets you edit before publishing)")
-    print("  2. Skip GitHub release (handle manually)")
+    # Check if release already exists
+    release_status = check_existing_release(repo_path, version)
     
-    create_release = input(f"\n{Colors.BRIGHT_BLUE}Choice (1-2):{Colors.RESET} ").strip()
-    
-    if create_release == "1":
-        success = create_github_release_draft(repo_path, version, changelog, package_name)
+    if release_status == 'draft':
+        print(f"\n{Colors.YELLOW}📝 Draft release already exists for {version}{Colors.RESET}")
+        publish_now = input(f"{Colors.BRIGHT_BLUE}Publish it now? (y/n):{Colors.RESET} ").strip().lower()
         
-        if success:
-            # Offer to publish immediately
-            print(f"\n{Colors.CYAN}📢 Release draft created!{Colors.RESET}")
-            publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release now? (y/n):{Colors.RESET} ").strip().lower()
+        if publish_now == 'y':
+            publish_draft_release(repo_path, version)
+        else:
+            print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
+            print(f"   gh release edit {version} --draft=false")
+    
+    elif release_status == 'published':
+        print(f"\n{Colors.GREEN}✓ Release {version} already published{Colors.RESET}")
+    
+    else:
+        # Create GitHub release draft
+        print(f"\n{Colors.CYAN}GitHub Release Options:{Colors.RESET}")
+        print("  1. Create release draft (recommended - lets you edit before publishing)")
+        print("  2. Skip GitHub release (handle manually)")
+        
+        create_release = input(f"\n{Colors.BRIGHT_BLUE}Choice (1-2):{Colors.RESET} ").strip()
+        
+        if create_release == "1":
+            success = create_github_release_draft(repo_path, version, changelog, package_name)
             
-            if publish_now == 'y':
-                result = run_command(['gh', 'release', 'edit', version, '--draft=false'], cwd=repo_path, capture_output=False)
-                if result.returncode == 0:
-                    print(f"{Colors.GREEN}🚀 Release published! PyPI workflow triggered.{Colors.RESET}")
+            if success:
+                # Offer to publish immediately
+                print(f"\n{Colors.CYAN}📢 Release draft created!{Colors.RESET}")
+                publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release now? (y/n):{Colors.RESET} ").strip().lower()
+                
+                if publish_now == 'y':
+                    publish_draft_release(repo_path, version)
                 else:
-                    print(f"{Colors.YELLOW}⚠ Could not publish. Run manually:{Colors.RESET}")
+                    print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
                     print(f"   gh release edit {version} --draft=false")
-            else:
-                print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
-                print(f"   gh release edit {version} --draft=false")
     
     # Publishing options
     print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
