@@ -1314,8 +1314,14 @@ def _main_logic(repo_path: Path):
                     # Update changelog now
                     write_changelog(repo_path, notes_for_changelog, current_ver)
                     run_git(["add", "CHANGELOG.md"], cwd=repo_path)
-                    run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
-                    print(f"  ✓ CHANGELOG.md updated and committed")
+                    
+                    # Only commit if there are actual changes
+                    status = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+                    if "CHANGELOG.md" in status:
+                        run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
+                        print(f"  ✓ CHANGELOG.md updated and committed")
+                    else:
+                        print(f"  ✓ CHANGELOG.md already committed")
                 
                 # Step 6: Recreate and push
                 print(f"\n🚀 Step 6/6: Recreating {tag}...")
@@ -1371,17 +1377,6 @@ def _main_logic(repo_path: Path):
                                 check=True
                             )
                             print(f"✅ Release {tag} fixed and published!")
-                            
-                            # Trigger PyPI publishing flow
-                            username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
-                            from . import pypi
-                            pypi.handle_pypi_publishing(
-                                repo_path=repo_path,
-                                version=tag,
-                                changelog=notes,
-                                username=username
-                            )
-                            
                         except subprocess.CalledProcessError as e:
                             print(f"❌ Failed to create release: {e}")
                         finally:
@@ -1531,10 +1526,10 @@ def _main_logic(repo_path: Path):
                 prev_tag = get_last_tag(repo_path)
                 
                 print("\nRegenerating changelog from git history...")
-                draft = get_smart_changelog(repo_path, prev_tag, current_ver)
+                draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
                 
                 # 4. Let user review/edit notes (Standard flow)
-                final_notes = edit_notes(current_ver, draft)
+                final_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=repo_path.name)
                 
                 write_changelog(repo_path, final_notes, current_ver)
                 perform_git_release(repo_path, current_ver)
@@ -1552,32 +1547,8 @@ def _main_logic(repo_path: Path):
                 return
     # Case 2: Clean Slate (Normal Flow)
     print(f"Current Version: {current_ver}")
-    print("\n[1] Patch  [2] Minor  [3] Major  [4] Regenerate Changelog")
+    print("\n[1] Patch  [2] Minor  [3] Major")
     c = input("Bump type: ").strip()
-    
-    if c == '4':
-        # Regenerate changelog for current version
-        print(f"\n🔄 Regenerating changelog for {current_ver}...")
-        draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, current_ver)
-        
-        from . import pypi
-        pkg_name = pypi.read_package_name(repo_path) or repo_path.name
-        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
-        smart_suffix = "Initial Release" if is_first_release else suggested_title
-        
-        final_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
-        write_changelog(repo_path, final_notes, current_ver)
-        
-        # Commit the updated changelog
-        run_git(["add", "CHANGELOG.md"], cwd=repo_path)
-        status = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
-        if "CHANGELOG.md" in status:
-            run_git(["commit", "-m", f"docs: Update CHANGELOG for {current_ver}"], cwd=repo_path)
-            print(f"✓ CHANGELOG.md updated and committed")
-        else:
-            print(f"✓ CHANGELOG.md updated (no changes)")
-        
-        return
     
     if c not in ['1', '2', '3']:
         print("Invalid choice.")

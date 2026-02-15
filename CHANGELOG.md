@@ -7,23 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] — 2026-02-14
 
-First public release of gitship – the interactive Git workflow tool that makes version control actually pleasant.
+First public release – gitship is now live on GitHub and (soon) PyPI!
 
-Key highlights in v0.2.0:
-• Intelligent rename detection before staging
-• Semantic change grouping (code / tests / docs / config)
-• Guided commit flows with smart message suggestions
-• Atomic release recovery: auto-detects & fixes incomplete tags/releases
-• Secure OIDC publishing setup (no API tokens needed)
-• Identity-verified push (never push as wrong user)
-• Self-dogfooding: this very release was created & published using gitship itself
+gitship is the interactive Git workflow tool that turns version control from frustrating archaeology into a guided, intelligent, and frustration-free experience.
 
-What git should have been: guided, frustration-free, and powerful.
+- **Intelligent rename detection** — finds renames by content similarity *before* staging (smarter than git's default)
 
-Install:
+- **Semantic change grouping** — auto-categorizes files (code / tests / docs / config / other) for better understanding
+
+- **Guided commit flows** — interactive review, smart message suggestions, one-command commit preparation
+
+- **Atomic release recovery** — detects incomplete tags/releases (tag exists but code not committed), offers safe rollback + re-tag
+
+- **Secure PyPI publishing setup** — auto-generates OIDC workflow, guides trusted publisher config, no API tokens needed
+
+- **Identity-verified push** — prevents pushing as wrong user
+
+- **Self-dogfooding milestone** — this release was created, recovered, tagged, and prepared for PyPI **using gitship itself**
+
+- Added full release lifecycle automation (bump → changelog → tag → push → publish prep)
+
+- Implemented atomic stash/pop for safe background operations (e.g. pull/rebase during release)
+
+- Introduced proactive state checks (tag vs commit mismatch detection)
+
+- Built-in PyPI first-release guidance + workflow generation
+
+```bash
+
 pip install gitship
 
-Repo: https://github.com/1minds3t/gitship
+pipx install gitship
+
+```
+
+https://github.com/1minds3t/gitship
+
+What git should have been: **guided, frustration-free, and powerful**._
 
 ## [Unreleased]
 
