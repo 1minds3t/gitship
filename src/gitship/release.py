@@ -814,6 +814,19 @@ def _main_logic(repo_path: Path):
             print(f"\n{Colors.YELLOW}⚠️  Missing PyPI publish workflow! Creating it now...{Colors.RESET}")
             pypi.ensure_publish_workflow(repo_path, package_name)
             # If created, it's already staged by ensure_publish_workflow
+        elif workflow_path.exists():
+            # Check if outdated
+            content = workflow_path.read_text()
+            if "@v1.8.11" in content:
+                print(f"\n{Colors.YELLOW}⚠️  Workflow has BROKEN version (@v1.8.11 causes metadata errors){Colors.RESET}")
+                fix = input("Fix now? (y/n): ").strip().lower()
+                if fix == 'y':
+                    content = content.replace("@v1.8.11", "@release/v1")
+                    workflow_path.write_text(content)
+                    run_git(["add", str(workflow_path)], cwd=repo_path)
+                    run_git(["commit", "-m", "fix: update pypi-publish to @release/v1"], cwd=repo_path)
+                    run_git(["push"], cwd=repo_path)
+                    print(f"{Colors.GREEN}✓ Fixed and pushed{Colors.RESET}")
     
     # CRITICAL: Check if already in rebase/merge state FIRST
     git_dir = repo_path / ".git"

@@ -254,79 +254,72 @@ jobs:
     return workflow
 
 
-def ensure_publish_workflow(repo_path: Path, package_name: str) -> tuple[bool, str]:
+def ensure_publish_workflow(repo_path: Path, package_name: str, force_recreate: bool = False) -> tuple[bool, str]:
     """
-    Create .github/workflows/publish.yml if missing.
+    Create .github/workflows/publish.yml if missing or outdated.
+    
+    Args:
+        force_recreate: If True, delete and recreate the workflow
     
     Returns (workflow_exists, method) where method is 'oidc' or 'token'.
     """
     workflows_dir = repo_path / ".github" / "workflows"
     publish_yml = workflows_dir / "publish.yml"
     
-    if publish_yml.exists():
-        print(f"{Colors.GREEN}✓ GitHub Actions workflow already exists{Colors.RESET}")
-        # Detect which method is being used
+    if publish_yml.exists() and not force_recreate:
         content = publish_yml.read_text()
-        if "id-token: write" in content:
-            return True, "oidc"
+        
+        # Check for outdated version
+        if "@v1.8.11" in content:
+            print(f"{Colors.YELLOW}⚠ Workflow has BROKEN action version (@v1.8.11){Colors.RESET}")
+            print(f"   This causes: 'Metadata is missing required fields' error")
+            print("\nOptions:")
+            print("  1. Update to @release/v1 (recommended)")
+            print("  2. Regenerate entire workflow")
+            print("  3. Keep current (will fail)")
+            
+            choice = input("\nChoice (1-3): ").strip()
+            
+            if choice == "1":
+                content = content.replace("@v1.8.11", "@release/v1")
+                publish_yml.write_text(content)
+                run_command(['git', 'add', str(publish_yml)], cwd=repo_path)
+                print(f"{Colors.GREEN}✓ Updated action version{Colors.RESET}")
+                method = "oidc" if "id-token: write" in content else "token"
+                return True, method
+            elif choice == "2":
+                publish_yml.unlink()
+                # Fall through to recreation
+            else:
+                method = "oidc" if "id-token: write" in content else "token"
+                return True, method
         else:
-            return True, "token"
+            print(f"{Colors.GREEN}✓ GitHub Actions workflow already exists{Colors.RESET}")
+            method = "oidc" if "id-token: write" in content else "token"
+            return True, method
     
+    # Create new workflow
     print(f"\n{Colors.CYAN}📦 PyPI Publishing Setup{Colors.RESET}")
-    print(f"{Colors.YELLOW}⚠ No GitHub Actions workflow found for PyPI publishing{Colors.RESET}\n")
+    print(f"{Colors.YELLOW}⚠ No GitHub Actions workflow found{Colors.RESET}\n")
     
     print("Choose publishing method:")
-    print("  1. OIDC Trusted Publisher (recommended - no tokens needed)")
-    print("  2. API Token (classic - works immediately if you have a token)")
+    print("  1. OIDC Trusted Publisher (recommended - no tokens)")
+    print("  2. API Token (classic)")
     
     choice = input("\nChoice (1-2): ").strip()
-    
     method = "oidc" if choice == "1" else "token"
     
-    print("\nI can create a workflow that:")
-    if method == "oidc":
-        print("  • Uses OpenID Connect (OIDC) for secure publishing")
-        print("  • Triggers on GitHub releases")
-        print("  • Automatically builds and uploads to PyPI")
-        print("  • Requires no API tokens (uses trusted publisher)")
-    else:
-        print("  • Uses PyPI API token for authentication")
-        print("  • Triggers on GitHub releases")
-        print("  • Automatically builds and uploads to PyPI")
-    
-    create = input(f"\n{Colors.BRIGHT_BLUE}Create .github/workflows/publish.yml? (y/n):{Colors.RESET} ").strip().lower()
-    
-    if create != 'y':
-        print(f"{Colors.YELLOW}Skipped workflow creation{Colors.RESET}")
-        return False, method
-    
-    # Create directories
     workflows_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Write workflow
     workflow_content = generate_publish_workflow(repo_path, package_name, method)
+    publish_yml.write_text(workflow_content)
     
-    with open(publish_yml, 'w') as f:
-        f.write(workflow_content)
-    
-    print(f"{Colors.GREEN}✓ Created .github/workflows/publish.yml{Colors.RESET}")
-    
-    # Stage the file
-    result = run_command(['git', 'add', '.github/workflows/publish.yml'], cwd=repo_path)
-    if result.returncode == 0:
-        print(f"{Colors.GREEN}✓ Staged workflow file for commit{Colors.RESET}")
+    print(f"{Colors.GREEN}✓ Created workflow{Colors.RESET}")
+    run_command(['git', 'add', str(publish_yml)], cwd=repo_path)
     
     if method == "token":
-        print(f"\n{Colors.YELLOW}⚠️  Don't forget to add your PyPI token as a GitHub secret:{Colors.RESET}")
-        print(f"   1. Get token from: {Colors.BRIGHT_CYAN}https://pypi.org/manage/account/token/{Colors.RESET}")
-        owner, repo = get_github_repo_info(repo_path)
-        if owner and repo:
-            print(f"   2. Go to: {Colors.BRIGHT_CYAN}https://github.com/{owner}/{repo}/settings/secrets/actions{Colors.RESET}")
-        print(f"   3. Create secret: {Colors.GREEN}PYPI_API_TOKEN{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}Add PYPI_API_TOKEN secret to GitHub{Colors.RESET}")
     
     return True, method
-    
-    return True
 
 
 def create_github_environment(repo_path: Path, owner: str, repo_name: str, env_name: str = "pypi") -> bool:
