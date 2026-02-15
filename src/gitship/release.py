@@ -590,7 +590,7 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
         print("Run 'git fetch --tags' to sync, or bump to a higher version.")
         return
 
-    print(f"\nPreparing to release You didn't actually replace the function in your releasegit.py file. {tag}...")
+    print(f"\nPreparing to release {tag}...")
 
     # Get ALL modified files (excluding translations)
     status_output = run_git(["status", "--porcelain"], cwd=repo_path)
@@ -762,17 +762,25 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
     print(f"[DEBUG] changelog length: {len(changelog_content)}")
     print(f"[DEBUG] changelog preview: {changelog_content[:200] if changelog_content else 'EMPTY'}")
     
-    # Call PyPI handler
+    # Try to determine release title if not provided
+    if not release_title and changelog_content:
+        # Try to extract the first line if it's not a header
+        first_line = changelog_content.strip().splitlines()[0]
+        if first_line and not first_line.startswith("**") and not first_line.startswith("#"):
+            release_title = first_line.strip()
+    
+    # Call PyPI handler (which now handles GH release creation)
     from gitship import pypi
     pypi.handle_pypi_publishing(
         repo_path=repo_path,
         version=tag,
         changelog=changelog_content,
-        username=username
+        username=username,
+        title_suffix=release_title
     )
     
     print("\n🎉 Release complete!")
-    # GH Release
+
     # GH Release
     if shutil.which("gh") and input("\nDraft GitHub Release? (y/n): ").lower() == 'y':
         # Extract body from changelog

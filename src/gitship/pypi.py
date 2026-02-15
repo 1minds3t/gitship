@@ -417,7 +417,7 @@ def publish_draft_release(repo_path: Path, version: str) -> bool:
         return False
 
 
-def create_github_release(repo_path: Path, tag: str, changelog: str, package_name: str, is_draft: bool = False) -> bool:
+def create_github_release(repo_path: Path, tag: str, changelog: str, package_name: str, is_draft: bool = False, title_suffix: str = None) -> bool:
     """
     Create a GitHub release using gh CLI.
     
@@ -437,7 +437,11 @@ def create_github_release(repo_path: Path, tag: str, changelog: str, package_nam
     owner, repo = get_github_repo_info(repo_path)
     
     # Build release title
-    title = f'{package_name} {tag}' if package_name else tag
+    base_title = f'{package_name} {tag}' if package_name else tag
+    if title_suffix:
+        title = f"{base_title} - {title_suffix}"
+    else:
+        title = base_title
     
     # DEBUG: Show what we're creating
     print(f"[DEBUG] Creating release:")
@@ -545,7 +549,7 @@ def offer_manual_publish(repo_path: Path):
                 print(f"{Colors.RED}✗ Upload failed{Colors.RESET}")
 
 
-def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, username: str):
+def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, username: str, title_suffix: str = None):
     """
     Main entry point for PyPI publishing flow.
     
@@ -556,6 +560,7 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         version: Version being released (e.g., "v0.3.0")
         changelog: Changelog content for this release
         username: GitHub username
+        title_suffix: Optional title suffix (e.g. "Fix commit bug")
     """
     print(f"[DEBUG] changelog length: {len(changelog)}")
     print(f"[DEBUG] changelog preview: {changelog[:200]}")
@@ -632,7 +637,7 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
             publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release immediately? (y/n) [y]:{Colors.RESET} ").strip().lower()
             is_draft = (publish_now == 'n')
             
-            success = create_github_release(repo_path, version, changelog, package_name, is_draft=is_draft)
+            success = create_github_release(repo_path, version, changelog, package_name, is_draft=is_draft, title_suffix=title_suffix)
             
             if success:
                 if not is_draft:
