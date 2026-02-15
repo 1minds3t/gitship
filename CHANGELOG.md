@@ -11,13 +11,18 @@ Fix README.md, cli, and docs
 
 **📝 Code Changes:**
 - UPDATE: src/gitship/cli.py (36 lines changed)
-- UPDATE: src/gitship/pypi.py (33 lines changed)
+- UPDATE: src/gitship/pypi.py (168 lines changed)
+- UPDATE: src/gitship/release.py (49 lines changed)
 
 **📚 Documentation:**
 - README.md (371 lines)
 - src/gitship/docs.py (162 lines)
 
-_4 files changed, 282 insertions(+), 320 deletions(-)_
+**Additional Changes:**
+- Update 2 code files
+- Update 3 code files; Update documentation
+
+_7 files changed, 411 insertions(+), 391 deletions(-)_
 
 ## [0.2.4] — 2026-02-14
 
