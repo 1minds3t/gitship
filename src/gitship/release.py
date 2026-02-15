@@ -1298,10 +1298,7 @@ def _main_logic(repo_path: Path):
                     print(f"  ✓ No changes to commit")
                 
                 # Step 5: Update CHANGELOG (will happen when user writes notes)
-                print(f"\n📝 Step 5/6: CHANGELOG will be updated after writing release notes")
-                
-                # Step 5: Update CHANGELOG (do this BEFORE tagging!)
-                print(f"\n📝 Step 5/6: Updating CHANGELOG.md...")
+                print(f"\n📝 Step 5/6: Checking CHANGELOG.md...")
                 
                 # Get notes from user (they already wrote them above)
                 # We need to get them again to put in changelog
@@ -1311,14 +1308,31 @@ def _main_logic(repo_path: Path):
                     # User will write notes next, so we'll update changelog then
                     print("  ! Will update changelog after getting release notes")
                 else:
-                    # Update changelog now
-                    write_changelog(repo_path, notes_for_changelog, current_ver)
-                    run_git(["add", "CHANGELOG.md"], cwd=repo_path)
+                    # Changelog exists - ask if user wants to regenerate
+                    print(f"  ✓ CHANGELOG.md entry exists for {current_ver}")
+                    regen = input("    Regenerate changelog from git history? (y/n): ").strip().lower()
                     
-                    # Only commit if there are actual changes
+                    if regen == 'y':
+                        # Get previous tag
+                        prev_tag = get_last_tag(repo_path)
+                        
+                        print("\n🔄 Regenerating changelog from git history...")
+                        draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
+                        
+                        from . import pypi
+                        pkg_name = pypi.read_package_name(repo_path) or repo_path.name
+                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
+                        smart_suffix = "Initial Release" if is_first_release else suggested_title
+                        
+                        final_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
+                        write_changelog(repo_path, final_notes, current_ver)
+                        notes_for_changelog = final_notes  # Update for later use
+                    
+                    # Commit changelog if changed
+                    run_git(["add", "CHANGELOG.md"], cwd=repo_path)
                     status = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
                     if "CHANGELOG.md" in status:
-                        run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
+                        run_git(["commit", "-m", f"docs: Update CHANGELOG for {current_ver}"], cwd=repo_path)
                         print(f"  ✓ CHANGELOG.md updated and committed")
                     else:
                         print(f"  ✓ CHANGELOG.md already committed")
@@ -1377,6 +1391,16 @@ def _main_logic(repo_path: Path):
                                 check=True
                             )
                             print(f"✅ Release {tag} fixed and published!")
+                            
+                            # Trigger PyPI publishing flow
+                            username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
+                            pypi.handle_pypi_publishing(
+                                repo_path=repo_path,
+                                version=tag,
+                                changelog=notes,
+                                username=username
+                            )
+                            
                         except subprocess.CalledProcessError as e:
                             print(f"❌ Failed to create release: {e}")
                         finally:
