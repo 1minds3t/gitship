@@ -1520,10 +1520,10 @@ def _main_logic(repo_path: Path):
                 prev_tag = get_last_tag(repo_path)
                 
                 print("\nRegenerating changelog from git history...")
-                draft = get_smart_changelog(repo_path, prev_tag, current_ver)
+                draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
                 
                 # 4. Let user review/edit notes (Standard flow)
-                final_notes = edit_notes(current_ver, draft)
+                final_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=repo_path.name)
                 
                 write_changelog(repo_path, final_notes, current_ver)
                 perform_git_release(repo_path, current_ver)
