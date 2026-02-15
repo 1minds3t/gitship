@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] — 2026-02-14
+
+Fix README.md, cli, and docs
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/cli.py (36 lines changed)
+- UPDATE: src/gitship/pypi.py (33 lines changed)
+
+**📚 Documentation:**
+- README.md (371 lines)
+- src/gitship/docs.py (162 lines)
+
+_4 files changed, 282 insertions(+), 320 deletions(-)_
+
 ## [0.2.4] — 2026-02-14
 
 Fix pypi and release
