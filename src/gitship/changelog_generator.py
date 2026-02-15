@@ -249,105 +249,183 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     
     print(f"[DEBUG] Gitship commits: {len(gitship_commits)}, Other: {len(other_commits)}")
     
-    # Collect ALL file changes from ALL commits to generate a comprehensive title
-    all_new_files = set()
-    all_modified_files = set()
-    all_key_modules = set()
+    # Collect ALL file changes from ALL commits to generate comprehensive changelog
+    all_new_files = []
+    all_modified_files = []
+    all_renames = []
     
-    # Analyze ALL gitship commits, not just the first one
+    # Also collect commit subjects for "Additional Changes" section
+    commit_subjects = []
+    
+    # Analyze ALL gitship commits and extract their detailed file changes
     for commit in gitship_commits:
         body = commit['body']
+        commit_subjects.append(commit['subject'])
         
-        # Parse each commit's changes
+        # Parse the structured sections from each commit
+        current_section = None
         for line in body.split('\n'):
-            line = line.strip()
-            if not (line.startswith('•') or line.startswith('-')):
+            line_stripped = line.strip()
+            
+            # Detect section headers
+            if line_stripped.endswith(':'):
+                if 'New files:' in line_stripped:
+                    current_section = 'new'
+                elif 'Modified:' in line_stripped:
+                    current_section = 'modified'
+                elif 'Renames:' in line_stripped:
+                    current_section = 'renames'
+                else:
+                    current_section = None
                 continue
+            
+            # Extract file entries
+            if current_section and (line_stripped.startswith('•') or line_stripped.startswith('-')):
+                content = line_stripped.lstrip('•-').strip()
                 
-            # Extract filename
-            content = line.lstrip('•-').strip()
-            filename = content.split('(')[0].strip()
-            if not filename:
-                continue
-            
-            # Determine if new or modified based on section
-            prev_lines = body[:body.find(line)].split('\n')
-            in_new_section = any('New files:' in l for l in prev_lines[-5:])
-            in_modified_section = any('Modified:' in l for l in prev_lines[-5:])
-            
-            # Track files
-            if in_new_section:
-                all_new_files.add(filename)
-            elif in_modified_section:
-                all_modified_files.add(filename)
-            
-            # Extract module name
-            parts = filename.replace('.py', '').split('/')
-            if len(parts) > 0:
-                module = parts[-1]
-                if module not in ['test', 'tests', '__init__', 'test_']:
-                    all_key_modules.add(module)
+                if current_section == 'new':
+                    all_new_files.append(content)
+                elif current_section == 'modified':
+                    all_modified_files.append(content)
+                elif current_section == 'renames':
+                    all_renames.append(content)
+    
+    # Now get the ACTUAL diff stats from git for accurate LOC counts
+    # This gives us the real total changes across all commits
+    file_stats = {}
+    try:
+        diff_stat_output = run_git(["diff", "--stat", f"{last_tag}..HEAD"], repo_path)
+        for line in diff_stat_output.split('\n'):
+            if '|' in line:
+                # Format: " filename | 123 +++++-----"
+                parts = line.split('|')
+                if len(parts) >= 2:
+                    filename = parts[0].strip()
+                    stat_part = parts[1].strip()
+                    # Extract numbers
+                    nums = stat_part.split()[0] if stat_part.split() else "0"
+                    try:
+                        changes = int(nums)
+                        file_stats[filename] = changes
+                    except:
+                        pass
+    except:
+        pass
     
     # Generate smart title based on ALL changes
-    key_files = list(all_key_modules)[:3]  # Top 3 modules
+    all_files = set()
+    for f in all_new_files:
+        fname = f.split('(')[0].strip()
+        all_files.add(fname)
+    for f in all_modified_files:
+        fname = f.split('(')[0].strip()
+        all_files.add(fname)
     
+    # Extract key module names
+    key_modules = set()
+    for filepath in all_files:
+        parts = filepath.replace('.py', '').split('/')
+        if parts:
+            module = parts[-1]
+            if module and module not in ['test', 'tests', '__init__', '__pycache__']:
+                key_modules.add(module)
+    
+    key_files = sorted(list(key_modules))[:3]
+    
+    # Generate title
     if len(key_files) == 1:
-        # Single module changed
-        if all_new_files:
+        if all_new_files and all_modified_files:
+            suggested_title = f"Add {key_files[0]} and improvements"
+        elif all_new_files:
             suggested_title = f"Add {key_files[0]}"
         else:
             suggested_title = f"Fix {key_files[0]}"
     elif len(key_files) == 2:
         if all_new_files and all_modified_files:
             suggested_title = f"Add {key_files[0]}, fix {key_files[1]}"
-        elif all_new_files:
-            suggested_title = f"Add {key_files[0]} and {key_files[1]}"
         else:
             suggested_title = f"Fix {key_files[0]} and {key_files[1]}"
     elif len(key_files) >= 3:
-        if all_new_files and all_modified_files:
-            suggested_title = f"Add {key_files[0]}, fix {key_files[1]} and {key_files[2]}"
-        else:
-            suggested_title = f"Fix {key_files[0]}, {key_files[1]}, and {key_files[2]}"
+        suggested_title = f"Fix {key_files[0]}, {key_files[1]}, and {key_files[2]}"
     else:
-        # No clear modules - use commit subjects
-        if gitship_commits:
-            suggested_title = gitship_commits[0]['subject']
-            if ':' in suggested_title:
-                suggested_title = suggested_title.split(':', 1)[1].strip()
-        else:
-            suggested_title = f"Release {new_version}"
+        suggested_title = commit_subjects[0] if commit_subjects else f"Release {new_version}"
+        if ':' in suggested_title:
+            suggested_title = suggested_title.split(':', 1)[1].strip()
     
-    # If we have detailed gitship commits, use their structured info for changelog
-    if gitship_commits:
-        # Use the most recent gitship commit's body as the primary source
-        primary_commit = gitship_commits[0]
-        
-        print(f"[DEBUG] Using title: {suggested_title}")
-        print(f"[DEBUG] Primary gitship commit subject: {primary_commit['subject']}")
-        print(f"[DEBUG] Body preview (first 200 chars): {primary_commit['body'][:200]}")
-        
-        # Extract structured file changes
-        file_changes = extract_file_changes_from_gitship_commit(primary_commit['body'])
-        print(f"[DEBUG] Extracted {len(file_changes)} file change lines")
-        
-        if file_changes:
-            changelog_lines.extend(file_changes)
-            changelog_lines.append("")
-        else:
-            # Fallback: if extraction failed, show the commit subject at least
-            print(f"[DEBUG] No file changes extracted, using commit subject")
-            changelog_lines.append(f"- {primary_commit['subject']}")
-            changelog_lines.append("")
-        
-        # Add other gitship commits if they exist
-        if len(gitship_commits) > 1:
-            changelog_lines.append("**Additional Changes:**")
-            for commit in gitship_commits[1:]:
-                changelog_lines.append(f"- {commit['subject']}")
-            changelog_lines.append("")
+    # Build comprehensive changelog with ALL changes
+    changelog_lines = []
     
-    # Add important non-gitship commits
+    # Categorize files by type for emoji display
+    categorized = {
+        'code': [],
+        'tests': [],
+        'docs': [],
+        'config': [],
+        'other': []
+    }
+    
+    for filepath in all_files:
+        fname_lower = filepath.lower()
+        if 'test' in fname_lower:
+            categorized['tests'].append(filepath)
+        elif filepath.endswith(('.md', '.rst', '.txt')) or 'doc' in fname_lower:
+            categorized['docs'].append(filepath)
+        elif filepath.endswith(('.toml', '.yml', '.yaml', '.json', '.ini', '.cfg')):
+            categorized['config'].append(filepath)
+        elif filepath.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs')):
+            categorized['code'].append(filepath)
+        else:
+            categorized['other'].append(filepath)
+    
+    # Add sections with emojis
+    if categorized['code']:
+        changelog_lines.append("**📝 Code Changes:**")
+        for filepath in sorted(categorized['code']):
+            # Try to get LOC from file_stats
+            loc_info = ""
+            if filepath in file_stats:
+                loc_info = f" ({file_stats[filepath]} lines changed)"
+            # Check if new or modified
+            is_new = any(filepath in f for f in all_new_files)
+            prefix = "NEW" if is_new else "UPDATE"
+            changelog_lines.append(f"- {prefix}: {filepath}{loc_info}")
+        changelog_lines.append("")
+    
+    if categorized['tests']:
+        changelog_lines.append("**🧪 Tests:**")
+        for filepath in sorted(categorized['tests']):
+            loc_info = f" ({file_stats[filepath]} lines)" if filepath in file_stats else ""
+            is_new = any(filepath in f for f in all_new_files)
+            prefix = "NEW" if is_new else "UPDATE"
+            changelog_lines.append(f"- {prefix}: {filepath}{loc_info}")
+        changelog_lines.append("")
+    
+    if categorized['docs']:
+        changelog_lines.append("**📚 Documentation:**")
+        for filepath in sorted(categorized['docs']):
+            loc_info = f" ({file_stats[filepath]} lines)" if filepath in file_stats else ""
+            changelog_lines.append(f"- {filepath}{loc_info}")
+        changelog_lines.append("")
+    
+    if categorized['config']:
+        changelog_lines.append("**⚙️ Configuration:**")
+        for filepath in sorted(categorized['config']):
+            loc_info = f" ({file_stats[filepath]} lines)" if filepath in file_stats else ""
+            changelog_lines.append(f"- {filepath}{loc_info}")
+        changelog_lines.append("")
+    
+    # Add commit summaries
+    if len(commit_subjects) > 1:
+        changelog_lines.append("**Additional Changes:**")
+        for subject in commit_subjects:
+            changelog_lines.append(f"- {subject}")
+        changelog_lines.append("")
+    
+    # Debug output
+    print(f"[DEBUG] Using title: {suggested_title}")
+    print(f"[DEBUG] Generated {len(changelog_lines)} changelog lines from {len(gitship_commits)} commits")
+    
+    # Add important non-gitship commits if any
     if other_commits:
         # Group by type
         features = []

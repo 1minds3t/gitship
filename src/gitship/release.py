@@ -746,14 +746,21 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
     # PyPI Publishing
     username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
     
-    # Extract changelog
-    changelog_content = ""
-    cl_path = repo_path / "CHANGELOG.md"
-    if cl_path.exists():
-        content = cl_path.read_text()
-        parts = content.split("## [")
-        if len(parts) > 1:
-            changelog_content = ("## [" + parts[1]).split("## [")[0].strip()
+    # Extract changelog using the proper extraction function
+    # NOTE: extract_changelog_section expects version without 'v' prefix
+    version_no_v = tag.lstrip('v')
+    changelog_content = extract_changelog_section(repo_path, version_no_v)
+    if not changelog_content:
+        # Fallback: try to read the first section manually
+        cl_path = repo_path / "CHANGELOG.md"
+        if cl_path.exists():
+            content = cl_path.read_text()
+            parts = content.split("## [")
+            if len(parts) > 1:
+                changelog_content = ("## [" + parts[1]).split("## [")[0].strip()
+    
+    print(f"[DEBUG] changelog length: {len(changelog_content)}")
+    print(f"[DEBUG] changelog preview: {changelog_content[:200] if changelog_content else 'EMPTY'}")
     
     # Call PyPI handler
     from gitship import pypi
