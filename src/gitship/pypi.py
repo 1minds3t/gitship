@@ -564,35 +564,10 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         
         if publish_now == 'y':
             publish_draft_release(repo_path, version)
-        else:
-            print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
-            print(f"   gh release edit {version} --draft=false")
     
     elif release_status == 'published':
         print(f"\n{Colors.GREEN}✓ Release {version} already published{Colors.RESET}")
-    
-    else:
-        # Create GitHub release draft
-        print(f"\n{Colors.CYAN}GitHub Release Options:{Colors.RESET}")
-        print("  1. Create release draft (recommended - lets you edit before publishing)")
-        print("  2. Skip GitHub release (handle manually)")
         
-        create_release = input(f"\n{Colors.BRIGHT_BLUE}Choice (1-2):{Colors.RESET} ").strip()
-        
-        if create_release == "1":
-            success = create_github_release_draft(repo_path, version, changelog, package_name)
-            
-            if success:
-                # Offer to publish immediately
-                print(f"\n{Colors.CYAN}📢 Release draft created!{Colors.RESET}")
-                publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release now? (y/n):{Colors.RESET} ").strip().lower()
-                
-                if publish_now == 'y':
-                    publish_draft_release(repo_path, version)
-                else:
-                    print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
-                    print(f"   gh release edit {version} --draft=false")
-    
     # Publishing options (skip if we just published)
     if release_status != 'draft' or publish_now != 'y':
         print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
