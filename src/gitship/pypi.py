@@ -164,17 +164,12 @@ def check_pypi_status(package_name: str) -> str:
 def generate_publish_workflow(repo_path: Path, package_name: str, method: str = "oidc") -> str:
     """
     Generate GitHub Actions workflow for PyPI publishing.
-    
-    Args:
-        repo_path: Path to repository
-        package_name: Name of the package
-        method: 'oidc' for trusted publisher, 'token' for API token
+    Uses OIDC with automatic token fallback.
     
     Returns the workflow content as a string.
     """
     
-    if method == "oidc":
-        workflow = f"""name: Publish to PyPI
+    workflow = f"""name: Publish to PyPI
 
 on:
   release:
@@ -191,7 +186,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/{package_name}
     permissions:
-      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write
     
     steps:
       - name: Checkout code
@@ -210,45 +205,22 @@ jobs:
       - name: Build package
         run: python -m build
       
-      - name: Publish package distributions to PyPI
+      - name: Publish with OIDC (try first)
+        id: oidc_publish
+        continue-on-error: true
         uses: pypa/gh-action-pypi-publish@release/v1
-"""
-    else:  # token method
-        workflow = f"""name: Publish to PyPI
-
-on:
-  release:
-    types: [published]
-
-permissions:
-  contents: read
-
-jobs:
-  pypi-publish:
-    name: Upload release to PyPI
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
       
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
-      
-      - name: Build package
-        run: python -m build
-      
-      - name: Publish package distributions to PyPI
+      - name: Publish with token (fallback)
+        if: steps.oidc_publish.outcome == 'failure' && secrets.PYPI_API_TOKEN != ''
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{{{ secrets.PYPI_API_TOKEN }}}}
+      
+      - name: Show manual instructions
+        if: steps.oidc_publish.outcome == 'failure' && secrets.PYPI_API_TOKEN == ''
+        run: |
+          echo "❌ OIDC failed and no API token found"
+          echo "Manual upload: python -m twine upload dist/*"
 """
     
     return workflow
@@ -588,6 +560,7 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
     
     # Ensure workflow exists
     workflow_exists, method = ensure_publish_workflow(repo_path, package_name)
+    print(f"[DEBUG] workflow_exists={workflow_exists}, method={method}")
     
     # Guide setup for first release with OIDC
     if first_release and method == "oidc":
@@ -635,6 +608,7 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
     if release_status != 'draft' or publish_now != 'y':
         print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
 
+        print(f"[DEBUG] Checking workflow_exists: {workflow_exists}")
         if workflow_exists:
             print(f"\n{Colors.CYAN}With GitHub Actions workflow:{Colors.RESET}")
             print("  • When you PUBLISH the GitHub release, the workflow will:")

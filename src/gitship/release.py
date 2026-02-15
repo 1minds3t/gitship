@@ -1173,10 +1173,13 @@ def _main_logic(repo_path: Path):
             return
             
         elif choice == '2':
-            tag = last_tag_full
+            # Delete the CURRENT version tag (if it exists), not the last one
+            tag = f"v{current_ver}"
             print(f"\n🔄 Resetting release state for {tag}...")
 
-            if tag: # Only delete if a tag actually exists
+            # Check if current version tag exists and delete it
+            result = run_git(["tag", "-l", tag], cwd=repo_path, check=False)
+            if result.strip():
                 # 1. Delete remote tag
                 run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted remote tag {tag}")
@@ -1185,8 +1188,8 @@ def _main_logic(repo_path: Path):
                 run_git(["tag", "-d", tag], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted local tag {tag}")
             
-            # 3. Get previous tag
-            prev_tag = get_last_tag(repo_path)
+            # 3. Use LAST tag as the base
+            prev_tag = last_tag_full
             
             print("\nRegenerating changelog from git history...")
             # CORRECTLY UNPACK THE TUPLE
@@ -1266,12 +1269,32 @@ def _main_logic(repo_path: Path):
             if len(code_changes) > 10:
                 print(f"     ... and {len(code_changes)-10} more")
             
-            print("\nWhat would you like to do?")
-            print(f"  1. FIX IT: Delete release/tag, commit changes, recreate {last_tag_full}")
-            print(f"  2. NEW RELEASE: Bump to next version and release these as new")
-            print(f"  3. EXIT")
+            # Check if already on PyPI
+            from . import pypi
+            package_name = pypi.read_package_name(repo_path)
+            on_pypi = False
+            if package_name:
+                pypi_status = pypi.check_pypi_status(package_name)
+                if pypi_status == 'exists':
+                    on_pypi = True
+                    print(f"\n{Colors.RED}⚠️  CRITICAL: Package already published on PyPI!{Colors.RESET}")
+                    print(f"   Cannot modify {last_tag_full} - PyPI is immutable")
+                    print(f"   You MUST bump to next version")
             
-            choice = input("\nChoice (1-3): ").strip()
+            print("\nWhat would you like to do?")
+            if on_pypi:
+                print(f"  1. NEW RELEASE: Bump to next version (REQUIRED)")
+                print(f"  2. EXIT")
+                choice = input("\nChoice (1-2): ").strip()
+                if choice == '1':
+                    choice = '2'  # Map to NEW RELEASE option
+                elif choice == '2':
+                    choice = '3'  # Map to EXIT
+            else:
+                print(f"  1. FIX IT: Delete release/tag, commit changes, recreate {last_tag_full}")
+                print(f"  2. NEW RELEASE: Bump to next version and release these as new")
+                print(f"  3. EXIT")
+                choice = input("\nChoice (1-3): ").strip()
             
             if choice == '1':
                 tag = last_tag_full
@@ -1384,7 +1407,10 @@ def _main_logic(repo_path: Path):
                             print("  ✓ CHANGELOG.md updated")
                     else:
                         # If notes existed, we still need a title. Default to generic if not extracted.
-                        user_title = f"Release {current_ver}"
+                        # Extract actual title from changelog first line
+                        lines = notes.strip().split('\n')
+                        user_title = lines[0] if lines and not lines[0].startswith('**') else f"Release {current_ver}"
+                        print(f"[DEBUG] Extracted title: {user_title}")
 
                     if notes:
                         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
@@ -1609,7 +1635,11 @@ def _main_logic(repo_path: Path):
     # Changelog
     draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
     # Smart suffix for first release
-    is_first_release = new_ver.startswith('0.') or new_ver == '1.0.0'
+    # Check if on PyPI to determine if first release
+    from . import pypi as pypi_module
+    pkg_name_check = pypi_module.read_package_name(repo_path)
+    pypi_status = pypi_module.check_pypi_status(pkg_name_check) if pkg_name_check else 'unknown'
+    is_first_release = (pypi_status == 'missing')
     smart_suffix = "Initial Release" if is_first_release else suggested_title
     final_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
     write_changelog(repo_path, final_notes, new_ver)
