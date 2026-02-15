@@ -638,19 +638,20 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
                     print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
                     print(f"   gh release edit {version} --draft=false")
     
-    # Publishing options
-    print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
-    
-    if workflow_exists:
-        print(f"\n{Colors.CYAN}With GitHub Actions workflow:{Colors.RESET}")
-        print("  • When you PUBLISH the GitHub release, the workflow will:")
-        print("    1. Build the package")
-        if method == "oidc":
-            print("    2. Publish to PyPI automatically (via OIDC)")
-        else:
-            print("    2. Publish to PyPI automatically (via API token)")
-        print(f"    3. Package will be live at: https://pypi.org/project/{package_name}/")
-        print(f"\n{Colors.GREEN}✓ All set! Just publish the release when ready.{Colors.RESET}")
+    # Publishing options (skip if we just published)
+    if release_status != 'draft' or publish_now != 'y':
+        print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
+
+        if workflow_exists:
+            print(f"\n{Colors.CYAN}With GitHub Actions workflow:{Colors.RESET}")
+            print("  • When you PUBLISH the GitHub release, the workflow will:")
+            print("    1. Build the package")
+            if method == "oidc":
+                print("    2. Publish to PyPI automatically (via OIDC)")
+            else:
+                print("    2. Publish to PyPI automatically (via API token)")
+            print(f"    3. Package will be live at: https://pypi.org/project/{package_name}/")
+            print(f"\n{Colors.GREEN}✓ All set! Just publish the release when ready.{Colors.RESET}")
     else:
         print(f"\n{Colors.YELLOW}⚠ No workflow configured{Colors.RESET}")
         offer_manual_publish(repo_path)

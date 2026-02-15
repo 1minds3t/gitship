@@ -1463,17 +1463,16 @@ def _main_logic(repo_path: Path):
                 notes = extract_changelog_section(repo_path, current_ver)
                 
                 if not notes:
-                    print("   ! Changelog entry empty or not found.")
-                    if input("   Open editor to write manually? (y/n): ").lower() == 'y':
-                        # FIX: Provide default title to fix TypeError
-                        # Smart default based on version
-                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
-                        default_suffix = "Initial Release" if is_first_release else "Release"
-                        notes, _ = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
-                    else:
-                        return
+                    print("   ! No changelog found. Opening editor...")
+                    # FIX: Provide default title and unpack tuple
+                    is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
+                    default_suffix = "Initial Release" if is_first_release else "Release"
+                    notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                 else:
                     print(f"   ✓ Found {len(notes.splitlines())} lines of notes")
+                    # Extract title from first line of notes
+                    first_line = notes.strip().split('\n')[0] if notes else ""
+                    user_title = first_line if first_line and not first_line.startswith('**') else f"Release {current_ver}"
                 
                 if notes:
                     # CHECK IF TAG EXISTS ON REMOTE FIRST!
