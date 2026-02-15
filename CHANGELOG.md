@@ -7,16 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.2] — 2026-02-14
 
-Add commit, fix test_changelog and changelog_generator
+Fix changelog_generator, cli, and commit
 
-**Modified:**
-- src/gitship/changelog_generator.py (+71/-7 lines)
+**📝 Code Changes:**
+- NEW: src/gitship/changelog_generator.py (496 lines changed)
+- UPDATE: src/gitship/cli.py (84 lines changed)
+- UPDATE: src/gitship/commit.py (38 lines changed)
+- NEW: src/gitship/deps.py (300 lines changed)
+- UPDATE: src/gitship/pypi.py (52 lines changed)
+- UPDATE: src/gitship/release.py (92 lines changed)
+
+**🧪 Tests:**
+- NEW: tests/test.py (212 lines)
+- NEW: tests/test_changelog.py (173 lines)
+- NEW: tests/test_changelog_extraction.py (212 lines)
+
+**⚙️ Configuration:**
+- yproject.toml
 
 **Additional Changes:**
+- Update 2 code files
+- Update 1 code files
 - Update 2 code files; Update tests
 - Update 6 code files; Update configuration
 
-_11 files changed, 1521 insertions(+), 66 deletions(-)_
+_11 files changed, 1610 insertions(+), 74 deletions(-)_
 
 ## [0.2.1] — 2026-02-14
 
