@@ -5,18 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.2] — 2026-02-14
-
-Release v0.2.2
-
 ## [0.2.1] — 2026-02-14
 
-Code updates and improvements
+complete v0.2.1 release with all code changes
+
+**Features:**
+- feat: complete v0.2.1 release with all code changes
+- feat: complete v0.2.2 release with all code changes
 
 **Configuration Updates:**
 - Update 2 code files; configuration
 
-_3 files changed, 58 insertions(+), 54 deletions(-)_
+_4 files changed, 107 insertions(+), 82 deletions(-)_
+
+## [0.2.2] — 2026-02-14
+
+Release v0.2.2
 
 ## [0.2.0] — 2026-02-14
 

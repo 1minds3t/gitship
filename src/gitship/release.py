@@ -1655,10 +1655,26 @@ def _main_logic(repo_path: Path):
     draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
     # Smart suffix for first release
     # Check if on PyPI to determine if first release
+    # Check if ANY version on PyPI to determine if first release
     from . import pypi as pypi_module
     pkg_name_check = pypi_module.read_package_name(repo_path)
-    pypi_status = pypi_module.check_pypi_status(pkg_name_check) if pkg_name_check else 'unknown'
-    is_first_release = (pypi_status == 'missing')
+    
+    # Check if package has ANY releases on PyPI (not just this version)
+    is_first_release = False
+    if pkg_name_check:
+        try:
+            import requests
+            resp = requests.get(f"https://pypi.org/pypi/{pkg_name_check}/json", timeout=5)
+            if resp.status_code == 404:
+                # Package doesn't exist at all on PyPI
+                is_first_release = True
+            elif resp.status_code == 200:
+                # Package exists, check if it has any releases
+                data = resp.json()
+                is_first_release = len(data.get('releases', {})) == 0
+        except:
+            is_first_release = False
+    
     smart_suffix = "Initial Release" if is_first_release else suggested_title
     final_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
     write_changelog(repo_path, final_notes, new_ver)
