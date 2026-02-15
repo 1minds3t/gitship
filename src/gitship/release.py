@@ -53,7 +53,7 @@ def get_current_version(repo_path: Path) -> str:
 
 def get_last_tag(repo_path: Path) -> str:
     try:
-        return run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path)
+        return run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path, check=False)
     except SystemExit:
         return "" # No tags yet
 
@@ -558,7 +558,7 @@ def reset_version_to_tag(repo_path: Path):
         run_git(["push"], cwd=repo_path)
         print("✓ Pushed")
 
-def perform_git_release(repo_path: Path, version: str):
+def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
     tag = f"v{version}"
     
     # Check remote first
@@ -760,9 +760,17 @@ def perform_git_release(repo_path: Path, version: str):
                 pkg_name = pypi.read_package_name(repo_path) or repo_path.name
                 
                 if not release_title:
-                    release_title = f"Release {version}"
-                
-                final_gh_title = f"{pkg_name} {tag} — {release_title}"
+                    # If no title was passed, extract the first line from the changelog section
+                    # as a fallback, otherwise create a generic one.
+                    body_text = extract_changelog_section(repo_path, version)
+                    first_line = body_text.strip().splitlines()[0] if body_text else ""
+                    if first_line and not first_line.startswith("**"):
+                        release_title = first_line
+                    else:
+                        release_title = f"Release {version}"
+
+                # Use a hyphen for consistency with the editor prompt
+                final_gh_title = f"{pkg_name} {tag} - {release_title}"
                 
                 with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
                     tf.write(body)
@@ -1152,9 +1160,10 @@ def _main_logic(repo_path: Path):
             return
             
         elif choice == '2':
-                tag = last_tag_full
-                print(f"\n🔄 Resetting release state for {tag}...")
-                
+            tag = last_tag_full
+            print(f"\n🔄 Resetting release state for {tag}...")
+
+            if tag: # Only delete if a tag actually exists
                 # 1. Delete remote tag
                 run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted remote tag {tag}")
@@ -1162,22 +1171,22 @@ def _main_logic(repo_path: Path):
                 # 2. Delete local tag
                 run_git(["tag", "-d", tag], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted local tag {tag}")
-                
-                # 3. Get previous tag
-                prev_tag = get_last_tag(repo_path)
-                
-                print("\nRegenerating changelog from git history...")
-                draft = get_smart_changelog(repo_path, prev_tag, current_ver)
-                
-                # 4. Auto-format notes (SKIP EDITOR)
-                date_str = datetime.now().strftime("%Y-%m-%d")
-                final_notes = f"## [{current_ver}] - {date_str}\n\n{draft}\n"
-                
-                print(f"  ✓ Generated {len(final_notes.splitlines())} lines of changelog")
-                
-                write_changelog(repo_path, final_notes, current_ver)
-                perform_git_release(repo_path, current_ver)
-                return
+            
+            # 3. Get previous tag
+            prev_tag = get_last_tag(repo_path)
+            
+            print("\nRegenerating changelog from git history...")
+            # CORRECTLY UNPACK THE TUPLE
+            draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
+            
+            # 4. USE THE EDITOR, DON'T SKIP IT
+            from . import pypi
+            pkg_name = pypi.read_package_name(repo_path)
+            final_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=pkg_name)
+            
+            write_changelog(repo_path, final_notes, current_ver)
+            perform_git_release(repo_path, current_ver, release_title)
+            return
             
         elif choice == '3':
             print(f"Reverting pyproject.toml to {last_ver}...")

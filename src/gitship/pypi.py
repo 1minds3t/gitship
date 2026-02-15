@@ -131,6 +131,9 @@ def get_github_repo_info(repo_path: Path) -> Tuple[Optional[str], Optional[str]]
                 return parts[0], parts[1]
     
     return None, None
+
+
+def check_pypi_status(package_name: str) -> str:
     """
     Check if package exists on PyPI.
     
