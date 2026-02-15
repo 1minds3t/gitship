@@ -632,28 +632,31 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
     elif release_status == 'none':
         # No release exists - create one
         if workflow_exists:
-            # Ask user preference (default to publish for automation)
-            print(f"\n{Colors.CYAN}GitHub Release Configuration:{Colors.RESET}")
-            publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release immediately? (y/n) [y]:{Colors.RESET} ").strip().lower()
-            is_draft = (publish_now == 'n')
+            print(f"\n{Colors.CYAN}Creating GitHub Release Draft...{Colors.RESET}")
             
-            success = create_github_release(repo_path, version, changelog, package_name, is_draft=is_draft, title_suffix=title_suffix)
+            # Always create as draft first for safety
+            success = create_github_release(repo_path, version, changelog, package_name, is_draft=True, title_suffix=title_suffix)
             
             if success:
-                if not is_draft:
-                    print(f"\n{Colors.GREEN}🚀 Release published! PyPI workflow triggered.{Colors.RESET}")
+                # Construct URL for review
+                owner, repo = get_github_repo_info(repo_path)
+                if owner and repo:
+                    release_url = f"https://github.com/{owner}/{repo}/releases/tag/{version}"
+                    print(f"\n{Colors.BOLD}📝 Draft created:{Colors.RESET} {Colors.BRIGHT_BLUE}{release_url}{Colors.RESET}")
+                
+                print(f"{Colors.DIM}   Please review the release notes online.{Colors.RESET}")
+                
+                # Ask to publish
+                confirm = input(f"\n{Colors.BRIGHT_GREEN}🚀 Ready to PUBLISH? (y/n):{Colors.RESET} ").strip().lower()
+                
+                if confirm == 'y':
+                    publish_draft_release(repo_path, version)
                 else:
-                    print(f"\n{Colors.GREEN}✅ Draft release created!{Colors.RESET}")
-                    print(f"\n{Colors.CYAN}Next steps:{Colors.RESET}")
-                    print(f"  1. Review the release at: https://github.com/{{owner}}/{{repo}}/releases")
-                    print(f"  2. Publish it to trigger PyPI workflow")
-                    print(f"  3. Or publish now with: gh release edit {version} --draft=false")
+                    print(f"\n{Colors.YELLOW}ℹ Left as draft.{Colors.RESET}")
+                    print(f"  When ready, run: {Colors.DIM}gh release edit {version} --draft=false{Colors.RESET}")
             else:
                 print(f"\n{Colors.YELLOW}⚠ Failed to create release{Colors.RESET}")
                 offer_manual_publish(repo_path)
-        else:
-            print(f"\n{Colors.YELLOW}⚠ No workflow configured{Colors.RESET}")
-            offer_manual_publish(repo_path)
     
     else:
         # Unknown status

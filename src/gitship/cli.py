@@ -13,12 +13,12 @@ from typing import Optional
 
 
 try:
-    from gitship import check, fix, review, release, commit, branch, publish
+    from gitship import check, fix, review, release, commit, branch, publish, docs
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
     sys.path.insert(0, str(Path(__file__).parent / "src"))
-    from gitship import check, fix, review, release, commit
+    from gitship import check, fix, review, release, commit, docs
     from gitship.config import load_config, get_default_export_path
 
 
@@ -39,6 +39,7 @@ def show_menu(repo_path: Path):
     print("  7. branch   - Manage branches (create, switch, rename, set default)")
     print("  8. publish  - Create GitHub repo and push (with identity verification)")
     print("  9. deps     - Scan for and add missing dependencies to pyproject.toml")
+    print("  10. docs    - Generate or update README.md")
     print("  0. exit     - Exit gitship")
     print()
     
@@ -78,6 +79,18 @@ def show_menu(repo_path: Path):
     elif choice == "9":
         from gitship import deps
         deps.main_with_repo(repo_path)
+    elif choice == "10":
+        from gitship import docs
+        print("\nDocs Options:")
+        print("  1. Generate default README")
+        print("  2. Update from file")
+        sub = input("Choice (1-2): ").strip()
+        if sub == "1":
+            docs.main_with_args(repo_path, generate=True)
+        elif sub == "2":
+            src = input("Source file path: ").strip()
+            if src:
+                docs.main_with_args(repo_path, source=src)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -300,6 +313,22 @@ Commands:
         'deps',
         help='Scan for and add missing dependencies to pyproject.toml'
     )
+    # docs subcommand
+    docs_parser = subparsers.add_parser(
+        'docs',
+        help='Manage documentation/README'
+    )
+    docs_parser.add_argument(
+        '--generate',
+        action='store_true',
+        help='Generate default README with current features'
+    )
+    docs_parser.add_argument(
+        '--source',
+        type=str,
+        help='Update README from source file'
+    )
+
     args = parser.parse_args()
     
     # Determine repository path
@@ -366,6 +395,9 @@ Commands:
     elif args.command == 'deps':
         from gitship import deps
         deps.main_with_repo(repo_path)
+    elif args.command == 'docs':
+        from gitship import docs
+        docs.main_with_args(repo_path, source=args.source, generate=args.generate)
         
     else:
         # No command specified, show menu
