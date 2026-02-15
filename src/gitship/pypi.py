@@ -161,13 +161,20 @@ def check_pypi_status(package_name: str) -> str:
         return 'unknown'
 
 
-def generate_publish_workflow(repo_path: Path, package_name: str) -> str:
+def generate_publish_workflow(repo_path: Path, package_name: str, method: str = "oidc") -> str:
     """
-    Generate GitHub Actions workflow for PyPI publishing with OIDC.
+    Generate GitHub Actions workflow for PyPI publishing.
+    
+    Args:
+        repo_path: Path to repository
+        package_name: Name of the package
+        method: 'oidc' for trusted publisher, 'token' for API token
     
     Returns the workflow content as a string.
     """
-    workflow = f"""name: Publish to PyPI
+    
+    if method == "oidc":
+        workflow = f"""name: Publish to PyPI
 
 on:
   release:
@@ -188,10 +195,10 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v5.0.0
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'
       
@@ -204,45 +211,100 @@ jobs:
         run: python -m build
       
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.8.11
+        uses: pypa/gh-action-pypi-publish@release/v1
+"""
+    else:  # token method
+        workflow = f"""name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-publish:
+    name: Upload release to PyPI
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+      
+      - name: Build package
+        run: python -m build
+      
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{{{ secrets.PYPI_API_TOKEN }}}}
 """
     
     return workflow
 
 
-def ensure_publish_workflow(repo_path: Path, package_name: str) -> bool:
+def ensure_publish_workflow(repo_path: Path, package_name: str) -> tuple[bool, str]:
     """
     Create .github/workflows/publish.yml if missing.
     
-    Returns True if workflow exists or was created, False if user declined.
+    Returns (workflow_exists, method) where method is 'oidc' or 'token'.
     """
     workflows_dir = repo_path / ".github" / "workflows"
     publish_yml = workflows_dir / "publish.yml"
     
     if publish_yml.exists():
         print(f"{Colors.GREEN}✓ GitHub Actions workflow already exists{Colors.RESET}")
-        return True
+        # Detect which method is being used
+        content = publish_yml.read_text()
+        if "id-token: write" in content:
+            return True, "oidc"
+        else:
+            return True, "token"
     
     print(f"\n{Colors.CYAN}📦 PyPI Publishing Setup{Colors.RESET}")
     print(f"{Colors.YELLOW}⚠ No GitHub Actions workflow found for PyPI publishing{Colors.RESET}\n")
     
-    print("I can create a workflow that:")
-    print("  • Uses OpenID Connect (OIDC) for secure publishing")
-    print("  • Triggers on GitHub releases")
-    print("  • Automatically builds and uploads to PyPI")
-    print("  • Requires no API tokens (uses trusted publisher)")
+    print("Choose publishing method:")
+    print("  1. OIDC Trusted Publisher (recommended - no tokens needed)")
+    print("  2. API Token (classic - works immediately if you have a token)")
+    
+    choice = input("\nChoice (1-2): ").strip()
+    
+    method = "oidc" if choice == "1" else "token"
+    
+    print("\nI can create a workflow that:")
+    if method == "oidc":
+        print("  • Uses OpenID Connect (OIDC) for secure publishing")
+        print("  • Triggers on GitHub releases")
+        print("  • Automatically builds and uploads to PyPI")
+        print("  • Requires no API tokens (uses trusted publisher)")
+    else:
+        print("  • Uses PyPI API token for authentication")
+        print("  • Triggers on GitHub releases")
+        print("  • Automatically builds and uploads to PyPI")
     
     create = input(f"\n{Colors.BRIGHT_BLUE}Create .github/workflows/publish.yml? (y/n):{Colors.RESET} ").strip().lower()
     
     if create != 'y':
         print(f"{Colors.YELLOW}Skipped workflow creation{Colors.RESET}")
-        return False
+        return False, method
     
     # Create directories
     workflows_dir.mkdir(parents=True, exist_ok=True)
     
     # Write workflow
-    workflow_content = generate_publish_workflow(repo_path, package_name)
+    workflow_content = generate_publish_workflow(repo_path, package_name, method)
     
     with open(publish_yml, 'w') as f:
         f.write(workflow_content)
@@ -253,6 +315,16 @@ def ensure_publish_workflow(repo_path: Path, package_name: str) -> bool:
     result = run_command(['git', 'add', '.github/workflows/publish.yml'], cwd=repo_path)
     if result.returncode == 0:
         print(f"{Colors.GREEN}✓ Staged workflow file for commit{Colors.RESET}")
+    
+    if method == "token":
+        print(f"\n{Colors.YELLOW}⚠️  Don't forget to add your PyPI token as a GitHub secret:{Colors.RESET}")
+        print(f"   1. Get token from: {Colors.BRIGHT_CYAN}https://pypi.org/manage/account/token/{Colors.RESET}")
+        owner, repo = get_github_repo_info(repo_path)
+        if owner and repo:
+            print(f"   2. Go to: {Colors.BRIGHT_CYAN}https://github.com/{owner}/{repo}/settings/secrets/actions{Colors.RESET}")
+        print(f"   3. Create secret: {Colors.GREEN}PYPI_API_TOKEN{Colors.RESET}")
+    
+    return True, method
     
     return True
 
@@ -483,10 +555,10 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         first_release = input(f"{Colors.CYAN}Is this the first release? (y/n):{Colors.RESET} ").strip().lower() == 'y'
     
     # Ensure workflow exists
-    workflow_exists = ensure_publish_workflow(repo_path, package_name)
+    workflow_exists, method = ensure_publish_workflow(repo_path, package_name)
     
-    # Guide setup for first release
-    if first_release:
+    # Guide setup for first release with OIDC
+    if first_release and method == "oidc":
         guide_trusted_publisher_setup(repo_path, package_name, username)
     
     # Create GitHub release draft
@@ -497,7 +569,23 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
     create_release = input(f"\n{Colors.BRIGHT_BLUE}Choice (1-2):{Colors.RESET} ").strip()
     
     if create_release == "1":
-        create_github_release_draft(repo_path, version, changelog, package_name)
+        success = create_github_release_draft(repo_path, version, changelog, package_name)
+        
+        if success:
+            # Offer to publish immediately
+            print(f"\n{Colors.CYAN}📢 Release draft created!{Colors.RESET}")
+            publish_now = input(f"{Colors.BRIGHT_BLUE}Publish release now? (y/n):{Colors.RESET} ").strip().lower()
+            
+            if publish_now == 'y':
+                result = run_command(['gh', 'release', 'edit', version, '--draft=false'], cwd=repo_path, capture_output=False)
+                if result.returncode == 0:
+                    print(f"{Colors.GREEN}🚀 Release published! PyPI workflow triggered.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}⚠ Could not publish. Run manually:{Colors.RESET}")
+                    print(f"   gh release edit {version} --draft=false")
+            else:
+                print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
+                print(f"   gh release edit {version} --draft=false")
     
     # Publishing options
     print(f"\n{Colors.BOLD}Publishing Options:{Colors.RESET}")
@@ -506,7 +594,10 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         print(f"\n{Colors.CYAN}With GitHub Actions workflow:{Colors.RESET}")
         print("  • When you PUBLISH the GitHub release, the workflow will:")
         print("    1. Build the package")
-        print("    2. Publish to PyPI automatically (via OIDC)")
+        if method == "oidc":
+            print("    2. Publish to PyPI automatically (via OIDC)")
+        else:
+            print("    2. Publish to PyPI automatically (via API token)")
         print(f"    3. Package will be live at: https://pypi.org/project/{package_name}/")
         print(f"\n{Colors.GREEN}✓ All set! Just publish the release when ready.{Colors.RESET}")
     else:
