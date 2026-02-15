@@ -443,19 +443,6 @@ def create_github_release_draft(repo_path: Path, tag: str, changelog: str, packa
         '--title', f'{package_name} {tag}',
         '--notes', changelog
     ], cwd=repo_path, capture_output=False)
-    
-    if result.returncode == 0:
-        print(f"{Colors.GREEN}✓ Created GitHub release draft{Colors.RESET}")
-        
-        if owner and repo:
-            print(f"  View at: {Colors.BRIGHT_CYAN}https://github.com/{owner}/{repo}/releases{Colors.RESET}")
-        else:
-            print(f"  View releases in your repository settings")
-        
-        return True
-    else:
-        print(f"{Colors.RED}✗ Failed to create release draft{Colors.RESET}")
-        return False
 
 
 def offer_manual_publish(repo_path: Path):
@@ -531,6 +518,8 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         changelog: Changelog content for this release
         username: GitHub username
     """
+    print(f"[DEBUG] changelog length: {len(changelog)}")
+    print(f"[DEBUG] changelog preview: {changelog[:200]}")
     print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
     print(f"{Colors.BOLD}📦 PYPI PUBLISHING{Colors.RESET}")
     print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}")
