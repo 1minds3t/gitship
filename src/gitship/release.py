@@ -1314,8 +1314,14 @@ def _main_logic(repo_path: Path):
                     # Update changelog now
                     write_changelog(repo_path, notes_for_changelog, current_ver)
                     run_git(["add", "CHANGELOG.md"], cwd=repo_path)
-                    run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
-                    print(f"  ✓ CHANGELOG.md updated and committed")
+                    
+                    # Only commit if there are actual changes
+                    status = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+                    if "CHANGELOG.md" in status:
+                        run_git(["commit", "-m", f"docs: Add {current_ver} to CHANGELOG"], cwd=repo_path)
+                        print(f"  ✓ CHANGELOG.md updated and committed")
+                    else:
+                        print(f"  ✓ CHANGELOG.md already committed")
                 
                 # Step 6: Recreate and push
                 print(f"\n🚀 Step 6/6: Recreating {tag}...")

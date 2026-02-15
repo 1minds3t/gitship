@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] — 2026-02-14
 
-('**Features:**\n- feat: complete v0.2.0 release with all code changes\n\n**Configuration Updates:**\n- Update 1 code files\n- Update 5 code files; tests; documentation\n\n**Other Changes:**\n- Reset version to 0.2.0\n- Rename: checkgit→check, fixgit→fix; Update 9 code files; Update tests; Update documentation; Update configuration\n- test: add test file\n- docs: update README\n- Initial commit: gitship v0.1.0\n\n_1 file changed, 10 insertions(+), 9 deletions(-)_\n', 'complete v0.2.0 release with all code changes')
+First public release of gitship – the interactive Git workflow tool that makes version control actually pleasant.
+
+**Features:**
+- feat: complete v0.2.0 release with all code changes
+
+**Configuration Updates:**
+- Update 1 code files
+- Update 5 code files; tests; documentation
+
+**Other Changes:**
+- docs: Add 0.2.0 to CHANGELOG
+- Reset version to 0.2.0
+- Rename: checkgit→check, fixgit→fix; Update 9 code files; Update tests; Update documentation; Update configuration
+- test: add test file
+- docs: update README
+- Initial commit: gitship v0.1.0
+
+_1 file changed, 8 insertions(+), 2 deletions(-)_
 
 ## [Unreleased]
 
