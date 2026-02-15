@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.2] — 2026-02-14
 
-Release 0.2.2
+Update 2 code files; Update tests
 
-**Updates:**
+**New files:**
+- tests/test.py (212 lines)
+- tests/test_changelog.py (173 lines)
+- tests/test_changelog_extraction.py (212 lines)
+**Modified:**
+- src/gitship/changelog_generator.py (+67/-29 lines)
+- src/gitship/commit.py (+25/-8 lines)
+
+**Additional Changes:**
 - Update 6 code files; Update configuration
 
-_7 files changed, 760 insertions(+), 54 deletions(-)_
+_11 files changed, 1430 insertions(+), 67 deletions(-)_
 
 ## [0.2.1] — 2026-02-14
 
