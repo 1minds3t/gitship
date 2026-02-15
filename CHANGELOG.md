@@ -9,22 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 First public release of gitship – the interactive Git workflow tool that makes version control actually pleasant.
 
-**Features:**
-- feat: complete v0.2.0 release with all code changes
+Key highlights in v0.2.0:
+• Intelligent rename detection before staging
+• Semantic change grouping (code / tests / docs / config)
+• Guided commit flows with smart message suggestions
+• Atomic release recovery: auto-detects & fixes incomplete tags/releases
+• Secure OIDC publishing setup (no API tokens needed)
+• Identity-verified push (never push as wrong user)
+• Self-dogfooding: this very release was created & published using gitship itself
 
-**Configuration Updates:**
-- Update 1 code files
-- Update 5 code files; tests; documentation
+What git should have been: guided, frustration-free, and powerful.
 
-**Other Changes:**
-- docs: Add 0.2.0 to CHANGELOG
-- Reset version to 0.2.0
-- Rename: checkgit→check, fixgit→fix; Update 9 code files; Update tests; Update documentation; Update configuration
-- test: add test file
-- docs: update README
-- Initial commit: gitship v0.1.0
+Install:
+pip install gitship
 
-_1 file changed, 8 insertions(+), 2 deletions(-)_
+Repo: https://github.com/1minds3t/gitship
 
 ## [Unreleased]
 
