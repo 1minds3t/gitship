@@ -1385,7 +1385,7 @@ def _main_logic(repo_path: Path):
                             final_gh_title = f"{pkg_name} {tag} - {user_title}"
                             
                             result = subprocess.run(
-                                ["gh", "release", "create", tag, "-F", notes_file, "-t", final_gh_title, "--draft", "--target", "main"], 
+                                ["gh", "release", "create", tag, "-F", notes_file, "-t", final_gh_title, "--draft"], 
                                 cwd=repo_path,
                                 capture_output=False,  # Show output to user!
                                 check=True
