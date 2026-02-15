@@ -14,8 +14,8 @@ Fix changelog_generator, cli, and commit
 - UPDATE: src/gitship/cli.py (84 lines changed)
 - UPDATE: src/gitship/commit.py (38 lines changed)
 - NEW: src/gitship/deps.py (300 lines changed)
-- UPDATE: src/gitship/pypi.py (52 lines changed)
-- UPDATE: src/gitship/release.py (92 lines changed)
+- UPDATE: src/gitship/pypi.py (89 lines changed)
+- UPDATE: src/gitship/release.py (133 lines changed)
 
 **🧪 Tests:**
 - NEW: tests/test.py (212 lines)
@@ -23,15 +23,17 @@ Fix changelog_generator, cli, and commit
 - NEW: tests/test_changelog_extraction.py (212 lines)
 
 **⚙️ Configuration:**
+- pyproject.toml (10 lines)
 - yproject.toml
 
 **Additional Changes:**
-- Update 2 code files
 - Update 1 code files
+- Update 1 code files; Update configuration
+- Update 2 code files
 - Update 2 code files; Update tests
 - Update 6 code files; Update configuration
 
-_11 files changed, 1610 insertions(+), 74 deletions(-)_
+_11 files changed, 1689 insertions(+), 90 deletions(-)_
 
 ## [0.2.1] — 2026-02-14
 
