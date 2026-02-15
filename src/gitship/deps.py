@@ -133,14 +133,15 @@ def find_project_imports(repo_path: Path) -> set:
     return external_imports
 
 
-def update_pyproject_toml(repo_path: Path, new_deps: list):
+def update_pyproject_toml(repo_path: Path, new_deps: list, silent: bool = False) -> bool:
     """
     Add new dependencies to pyproject.toml's [project] dependencies array.
     Removes self-reference if present.
+    Returns True if file was modified.
     """
     toml_path = repo_path / "pyproject.toml"
     if not toml_path.exists() or not new_deps:
-        return
+        return False
 
     # Get package name to exclude it
     package_name = read_package_name(repo_path)
@@ -209,29 +210,37 @@ def update_pyproject_toml(repo_path: Path, new_deps: list):
             new_content = content.replace(match.group(0), f"dependencies = {new_deps_str}")
             toml_path.write_text(new_content)
             actual_added = len([d for d in new_deps if d != package_name])
-            print(f"✅ Updated pyproject.toml with {actual_added} dependencies.")
+            if not silent:
+                print(f"✅ Updated pyproject.toml with {actual_added} dependencies.")
+            return True
         else:
-            print("Warning: Could not update pyproject.toml")
+            if not silent:
+                print("Warning: Could not update pyproject.toml")
+            return False
     else:
-        print("✓ pyproject.toml is already up to date.")
+        if not silent:
+            print("✓ pyproject.toml is already up to date.")
+        return False
 
-def main_with_repo(repo_path: Path):
+def check_and_update_deps(repo_path: Path, silent: bool = False) -> bool:
     """
-    Main entry point for dependency check.
+    Scan and update dependencies.
+    Returns True if pyproject.toml was modified.
     """
-    print(f"\n🔍 Scanning for project dependencies... (omnipkg: {'enabled' if OMNIPKG_AVAILABLE else 'disabled'})")
-    
-    if not OMNIPKG_AVAILABLE:
-        print("ℹ  Install omnipkg for better dependency detection:")
-        print("   pip install omnipkg")
+    if not silent:
+        print(f"\n🔍 Scanning for project dependencies... (omnipkg: {'enabled' if OMNIPKG_AVAILABLE else 'disabled'})")
+        if not OMNIPKG_AVAILABLE:
+            print("ℹ  Install omnipkg for better dependency detection: pip install omnipkg")
     
     imports = find_project_imports(repo_path)
     
     if not imports:
-        print("✓ No external dependencies found.")
-        return
-        
-    print(f"-> Found potential modules: {', '.join(sorted(imports))}")
+        if not silent:
+            print("✓ No external dependencies found.")
+        return False
+    
+    if not silent:
+        print(f"-> Found potential modules: {', '.join(sorted(imports))}")
     
     packages = {convert_module_to_package_name(mod) for mod in imports}
     
@@ -239,7 +248,8 @@ def main_with_repo(repo_path: Path):
     package_name = read_package_name(repo_path)
     if package_name and package_name in packages:
         packages.remove(package_name)
-        print(f"-> Excluded self-reference: {package_name}")
+        if not silent:
+            print(f"-> Excluded self-reference: {package_name}")
     
     # Separate required vs optional dependencies
     required = []
@@ -251,18 +261,29 @@ def main_with_repo(repo_path: Path):
         else:
             required.append(pkg)
     
-    print(f"-> Required packages: {', '.join(sorted(required))}")
-    if optional:
-        print(f"-> Optional packages: {', '.join(sorted(optional))}")
+    if not silent:
+        print(f"-> Required packages: {', '.join(sorted(required))}")
+        if optional:
+            print(f"-> Optional packages: {', '.join(sorted(optional))}")
     
     # Update only required dependencies
-    update_pyproject_toml(repo_path, required)
+    modified = update_pyproject_toml(repo_path, required, silent=silent)
     
     # Add optional dependencies section if needed
     if optional:
         add_optional_dependencies(repo_path, optional)
+        # We don't track optional dep changes as 'modified' for commit purposes usually, 
+        # but technically it is a change. Let's assume update_pyproject_toml is the main one.
+        
+    return modified
 
 
+def main_with_repo(repo_path: Path):
+    """
+    Main entry point for dependency check.
+    """
+    check_and_update_deps(repo_path, silent=False)
+    
 def add_optional_dependencies(repo_path: Path, optional_deps: list):
     """
     Add optional dependencies to pyproject.toml under [project.optional-dependencies].

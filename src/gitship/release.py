@@ -830,6 +830,14 @@ def main_with_repo(repo_path: Path):
         sys.exit(130)
 
 def _main_logic(repo_path: Path):
+    # Auto-scan dependencies before starting release
+    try:
+        from gitship.deps import check_and_update_deps
+        print(f"\n{Colors.DIM}Scanning dependencies...{Colors.RESET}")
+        check_and_update_deps(repo_path, silent=True)
+    except ImportError:
+        pass
+
     print(f"\n⚓ GITSHIP RELEASE: {repo_path.name}")
     print("=" * 60)
     

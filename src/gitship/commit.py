@@ -1514,6 +1514,15 @@ def clean_untracked_files(analyzer: ChangeAnalyzer):
 
 def main_with_repo(repo_path: Path):
     """Main function for menu integration."""
+    # Auto-scan dependencies before analyzing
+    try:
+        from gitship.deps import check_and_update_deps
+        print(f"\n{Colors.DIM}Scanning dependencies...{Colors.RESET}")
+        if check_and_update_deps(repo_path, silent=True):
+            print(f"{Colors.GREEN}✓ Updated pyproject.toml with new dependencies{Colors.RESET}")
+    except ImportError:
+        pass
+
     analyzer = ChangeAnalyzer(repo_path)
     analyzer.analyze_changes()
     
