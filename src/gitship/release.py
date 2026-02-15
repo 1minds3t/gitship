@@ -1314,7 +1314,7 @@ def _main_logic(repo_path: Path):
                     return
             else:
                 print("Skipped. You'll need to push manually before creating releases.")
-        # Case 1.4: Incomplete release - tag/release exists but code changes uncommitted
+        # Case 1.4: Incomplete release - tag/release exists but code changes uncommitted OR commits ahead
     if current_ver == last_ver and last_tag_full:
         # Check if there are uncommitted code changes (excluding translations)
         status_output = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
@@ -1333,15 +1333,31 @@ def _main_logic(repo_path: Path):
                 if '/locale/' not in filename and 'CHANGELOG.md' not in filename:
                     code_changes.append(filename)
         
-        if code_changes and check_remote_tag(repo_path, last_tag_full):
+        # Check if commits are ahead of the tag
+        commits_ahead = 0
+        try:
+            res = run_git(["rev-list", "--count", f"{last_tag_full}..HEAD"], cwd=repo_path, check=False)
+            commits_ahead = int(res) if res.strip() else 0
+        except:
+            pass
+
+        if (code_changes or commits_ahead > 0) and check_remote_tag(repo_path, last_tag_full):
             print(f"\n🚨 INCOMPLETE RELEASE DETECTED: {last_tag_full}")
-            print(f"   Tag exists on remote, but you have {len(code_changes)} uncommitted code changes")
-            print(f"   These changes should have been part of {last_tag_full}!")
-            print(f"\n   Files:")
-            for f in code_changes[:10]:
-                print(f"     - {f}")
-            if len(code_changes) > 10:
-                print(f"     ... and {len(code_changes)-10} more")
+            print(f"   Tag exists on remote, but the release is not synced with HEAD.")
+            
+            if commits_ahead > 0:
+                print(f"   ⚠️  You are {Colors.YELLOW}{commits_ahead} commit(s) ahead{Colors.RESET} of tag {last_tag_full}")
+            if code_changes:
+                print(f"   ⚠️  You have {Colors.YELLOW}{len(code_changes)} uncommitted file(s){Colors.RESET}")
+            
+            print(f"   These changes should be part of {last_tag_full}!")
+            
+            if code_changes:
+                print(f"\n   Uncommitted Files:")
+                for f in code_changes[:10]:
+                    print(f"     - {f}")
+                if len(code_changes) > 10:
+                    print(f"     ... and {len(code_changes)-10} more")
             
             # Check if THIS VERSION already on PyPI
             from . import pypi
