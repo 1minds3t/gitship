@@ -378,25 +378,68 @@ def guide_trusted_publisher_setup(repo_path: Path, package_name: str, username: 
             print(f"{Colors.YELLOW}Please enter 'y' or 'n'{Colors.RESET}")
 
 
-def check_existing_release(repo_path: Path, version: str) -> str:
+def check_existing_release(repo_path: Path, tag: str) -> str:
     """
-    Check if a release already exists for this version.
+    Check if a GitHub release exists for a tag.
     
     Returns:
-        'published' - Release exists and is published
-        'draft' - Release exists as draft
         'none' - No release exists
+        'draft' - Draft release exists
+        'published' - Published release exists
+        'error' - Could not determine
     """
-    result = run_command(['gh', 'release', 'view', version], cwd=repo_path)
+    result = run_command(['gh', 'release', 'view', tag, '--json', 'isDraft,url'], cwd=repo_path)
     
     if result.returncode != 0:
+        # Release doesn't exist
         return 'none'
     
-    # Check if it's a draft
-    if '--draft' in result.stdout or 'draft' in result.stdout.lower():
-        return 'draft'
+    try:
+        import json
+        data = json.loads(result.stdout)
+        
+        if data.get('isDraft', False):
+            return 'draft'
+        else:
+            return 'published'
+    except:
+        return 'error'
+
+
+def wait_for_draft_to_populate(repo_path: Path, tag: str, max_wait: int = 15) -> bool:
+    """
+    Wait for GitHub to populate draft content.
     
-    return 'published'
+    GitHub creates drafts immediately but takes 1-5 seconds to populate
+    the body content from changelog.
+    
+    Returns True if draft has content, False if timeout.
+    """
+    import time
+    print(f"{Colors.DIM}Waiting for GitHub to populate draft content...{Colors.RESET}", end='', flush=True)
+    
+    for attempt in range(max_wait):
+        time.sleep(1)
+        print('.', end='', flush=True)
+        
+        # Check if draft has content now
+        result = run_command(['gh', 'release', 'view', tag, '--json', 'body'], cwd=repo_path)
+        
+        if result.returncode == 0:
+            try:
+                import json
+                data = json.loads(result.stdout)
+                body = data.get('body', '').strip()
+                
+                # Check if body has meaningful content (not just empty or placeholder)
+                if body and len(body) > 50:  # At least 50 chars of real content
+                    print(f" {Colors.GREEN}✓{Colors.RESET}")
+                    return True
+            except:
+                pass
+    
+    print(f" {Colors.YELLOW}⚠{Colors.RESET}")
+    return False
 
 
 def publish_draft_release(repo_path: Path, version: str) -> bool:
@@ -467,10 +510,15 @@ def create_github_release(repo_path: Path, tag: str, changelog: str, package_nam
     if result.returncode == 0:
         print(f"{Colors.GREEN}✅ {action.capitalize()} created successfully{Colors.RESET}")
         
-        # Wait for GitHub to process
-        import time
-        print(f"{Colors.DIM}Waiting for GitHub to process...{Colors.RESET}")
-        time.sleep(2)
+        # Wait for GitHub to populate the draft
+        if is_draft:
+            print(f"{Colors.DIM}Waiting for GitHub to process...{Colors.RESET}")
+            import time
+            time.sleep(2)
+            
+            populated = wait_for_draft_to_populate(repo_path, tag)
+            if not populated:
+                print(f"{Colors.YELLOW}⚠ Draft created but content may still be processing{Colors.RESET}")
         
         # Verify it was created
         verify = run_command(['gh', 'release', 'view', tag], cwd=repo_path)
@@ -600,22 +648,66 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         guide_trusted_publisher_setup(repo_path, package_name, username)
     
     # Check if release already exists
-    # Check if release already exists
     release_status = check_existing_release(repo_path, version)
     
+    print(f"[DEBUG] Release status for {version}: {release_status}")
+    
+    # FIXED: Handle draft case properly with menu
     if release_status == 'draft':
         print(f"\n{Colors.YELLOW}📝 Draft release already exists for {version}{Colors.RESET}")
-        publish_now = input(f"{Colors.BRIGHT_BLUE}Publish it now? (y/n):{Colors.RESET} ").strip().lower()
         
-        if publish_now == 'y':
+        # Check if it has content
+        result = run_command(['gh', 'release', 'view', version, '--json', 'body,url'], cwd=repo_path)
+        
+        draft_url = None
+        has_content = False
+        
+        if result.returncode == 0:
+            try:
+                import json
+                data = json.loads(result.stdout)
+                draft_url = data.get('url')
+                body = data.get('body', '').strip()
+                has_content = len(body) > 50
+            except:
+                pass
+        
+        if draft_url:
+            print(f"{Colors.DIM}   URL: {draft_url}{Colors.RESET}")
+        
+        if not has_content:
+            print(f"{Colors.YELLOW}   ⚠ Draft appears to be empty or still processing{Colors.RESET}")
+            print(f"{Colors.DIM}   Waiting for content to populate...{Colors.RESET}")
+            wait_for_draft_to_populate(repo_path, version)
+        
+        print(f"\n{Colors.BOLD}What would you like to do?{Colors.RESET}")
+        print(f"  1. 🚀 PUBLISH existing draft")
+        print(f"  2. 🗑️  DELETE draft and create new one")
+        print(f"  3. 🚪 EXIT (leave draft as-is)")
+        
+        choice = input(f"\n{Colors.BRIGHT_BLUE}Choice (1-3):{Colors.RESET} ").strip()
+        
+        if choice == '1':
             publish_draft_release(repo_path, version)
-            # DONE - workflow will trigger automatically
             print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
-            print(f"{Colors.GREEN}PyPI publishing preparation complete!{Colors.RESET}")
+            print(f"{Colors.GREEN}PyPI publishing complete!{Colors.RESET}")
             print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
             return
-        else:
-            print(f"\n{Colors.DIM}Publish later with:{Colors.RESET}")
+        
+        elif choice == '2':
+            print(f"\n{Colors.CYAN}Deleting existing draft...{Colors.RESET}")
+            result = run_command(['gh', 'release', 'delete', version, '--yes'], cwd=repo_path)
+            
+            if result.returncode == 0:
+                print(f"{Colors.GREEN}✓ Draft deleted{Colors.RESET}")
+                # Fall through to create new one
+                release_status = 'none'
+            else:
+                print(f"{Colors.RED}✗ Failed to delete draft{Colors.RESET}")
+                return
+        
+        elif choice == '3':
+            print(f"\n{Colors.DIM}Leaving draft as-is. Publish later with:{Colors.RESET}")
             print(f"   gh release edit {version} --draft=false")
             print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
             print(f"{Colors.GREEN}PyPI publishing preparation complete!{Colors.RESET}")
@@ -629,7 +721,8 @@ def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, userna
         print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
         return
     
-    elif release_status == 'none':
+    # Only create new release if status is 'none'
+    if release_status == 'none':
         # No release exists - create one
         if workflow_exists:
             print(f"\n{Colors.CYAN}Creating GitHub Release Draft...{Colors.RESET}")

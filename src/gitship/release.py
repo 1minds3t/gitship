@@ -778,55 +778,6 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
         username=username,
         title_suffix=release_title
     )
-    
-    print("\n🎉 Release complete!")
-
-    # GH Release
-    if shutil.which("gh") and input("\nDraft GitHub Release? (y/n): ").lower() == 'y':
-        # Extract body from changelog
-        cl_path = repo_path / "CHANGELOG.md"
-        if cl_path.exists():
-            content = cl_path.read_text()
-            parts = content.split("## [")
-            if len(parts) > 1:
-                body = "## [" + parts[1]
-                body_lines = body.splitlines()[1:]
-                body = "\n".join(body_lines).strip()
-                
-                # Use the passed release title or fallback
-                from . import pypi
-                pkg_name = pypi.read_package_name(repo_path) or repo_path.name
-                
-                if not release_title:
-                    # If no title was passed, extract the first line from the changelog section
-                    # as a fallback, otherwise create a generic one.
-                    body_text = extract_changelog_section(repo_path, version)
-                    first_line = body_text.strip().splitlines()[0] if body_text else ""
-                    if first_line and not first_line.startswith("**"):
-                        release_title = first_line
-                    else:
-                        release_title = f"Release {version}"
-
-                # Use a hyphen for consistency with the editor prompt
-                final_gh_title = f"{pkg_name} {tag} - {release_title}"
-                
-                with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
-                    tf.write(body)
-                    notes_file = tf.name
-                
-                # Use the generated title
-                subprocess.run([
-                    "gh", "release", "create", tag, 
-                    "-F", notes_file, 
-                    "-t", final_gh_title,
-                    "--draft", 
-                    "--target", "main"
-                ], cwd=repo_path)
-                
-                os.unlink(notes_file)
-                # Loop back to refresh state
-                print("\n🔄 Refreshing state...")
-                return _main_logic(repo_path)
 
 # --- MAIN FLOW ---
 
