@@ -249,19 +249,83 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     
     print(f"[DEBUG] Gitship commits: {len(gitship_commits)}, Other: {len(other_commits)}")
     
-    # If we have detailed gitship commits, use their structured info
+    # Collect ALL file changes from ALL commits to generate a comprehensive title
+    all_new_files = set()
+    all_modified_files = set()
+    all_key_modules = set()
+    
+    # Analyze ALL gitship commits, not just the first one
+    for commit in gitship_commits:
+        body = commit['body']
+        
+        # Parse each commit's changes
+        for line in body.split('\n'):
+            line = line.strip()
+            if not (line.startswith('•') or line.startswith('-')):
+                continue
+                
+            # Extract filename
+            content = line.lstrip('•-').strip()
+            filename = content.split('(')[0].strip()
+            if not filename:
+                continue
+            
+            # Determine if new or modified based on section
+            prev_lines = body[:body.find(line)].split('\n')
+            in_new_section = any('New files:' in l for l in prev_lines[-5:])
+            in_modified_section = any('Modified:' in l for l in prev_lines[-5:])
+            
+            # Track files
+            if in_new_section:
+                all_new_files.add(filename)
+            elif in_modified_section:
+                all_modified_files.add(filename)
+            
+            # Extract module name
+            parts = filename.replace('.py', '').split('/')
+            if len(parts) > 0:
+                module = parts[-1]
+                if module not in ['test', 'tests', '__init__', 'test_']:
+                    all_key_modules.add(module)
+    
+    # Generate smart title based on ALL changes
+    key_files = list(all_key_modules)[:3]  # Top 3 modules
+    
+    if len(key_files) == 1:
+        # Single module changed
+        if all_new_files:
+            suggested_title = f"Add {key_files[0]}"
+        else:
+            suggested_title = f"Fix {key_files[0]}"
+    elif len(key_files) == 2:
+        if all_new_files and all_modified_files:
+            suggested_title = f"Add {key_files[0]}, fix {key_files[1]}"
+        elif all_new_files:
+            suggested_title = f"Add {key_files[0]} and {key_files[1]}"
+        else:
+            suggested_title = f"Fix {key_files[0]} and {key_files[1]}"
+    elif len(key_files) >= 3:
+        if all_new_files and all_modified_files:
+            suggested_title = f"Add {key_files[0]}, fix {key_files[1]} and {key_files[2]}"
+        else:
+            suggested_title = f"Fix {key_files[0]}, {key_files[1]}, and {key_files[2]}"
+    else:
+        # No clear modules - use commit subjects
+        if gitship_commits:
+            suggested_title = gitship_commits[0]['subject']
+            if ':' in suggested_title:
+                suggested_title = suggested_title.split(':', 1)[1].strip()
+        else:
+            suggested_title = f"Release {new_version}"
+    
+    # If we have detailed gitship commits, use their structured info for changelog
     if gitship_commits:
         # Use the most recent gitship commit's body as the primary source
         primary_commit = gitship_commits[0]
         
+        print(f"[DEBUG] Using title: {suggested_title}")
         print(f"[DEBUG] Primary gitship commit subject: {primary_commit['subject']}")
         print(f"[DEBUG] Body preview (first 200 chars): {primary_commit['body'][:200]}")
-        
-        # Extract the title from the commit subject
-        if ':' in primary_commit['subject']:
-            suggested_title = primary_commit['subject'].split(':', 1)[1].strip()
-        else:
-            suggested_title = primary_commit['subject']
         
         # Extract structured file changes
         file_changes = extract_file_changes_from_gitship_commit(primary_commit['body'])
