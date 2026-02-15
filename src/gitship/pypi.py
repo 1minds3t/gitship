@@ -257,6 +257,38 @@ def ensure_publish_workflow(repo_path: Path, package_name: str) -> bool:
     return True
 
 
+def create_github_environment(repo_path: Path, owner: str, repo_name: str, env_name: str = "pypi") -> bool:
+    """
+    Create a GitHub environment using gh CLI API.
+    
+    Returns True if successful.
+    """
+    print(f"\n{Colors.CYAN}Creating GitHub environment '{env_name}'...{Colors.RESET}")
+    
+    # Check if gh CLI is available
+    result = run_command(['gh', '--version'])
+    if result.returncode != 0:
+        print(f"{Colors.YELLOW}⚠ GitHub CLI not found - skipping auto-creation{Colors.RESET}")
+        return False
+    
+    # Create environment with minimal settings (no deployment protection)
+    result = run_command([
+        'gh', 'api',
+        '--method', 'PUT',
+        '-H', 'Accept: application/vnd.github+json',
+        f'/repos/{owner}/{repo_name}/environments/{env_name}',
+        '-f', 'wait_timer=0',
+        '-F', 'prevent_self_review=false'
+    ], cwd=repo_path)
+    
+    if result.returncode == 0:
+        print(f"{Colors.GREEN}✓ Created GitHub environment '{env_name}'{Colors.RESET}")
+        return True
+    else:
+        print(f"{Colors.YELLOW}⚠ Could not auto-create environment (may already exist){Colors.RESET}")
+        return False
+
+
 def guide_trusted_publisher_setup(repo_path: Path, package_name: str, username: str):
     """
     Interactive guide for setting up PyPI trusted publisher.
@@ -267,22 +299,24 @@ def guide_trusted_publisher_setup(repo_path: Path, package_name: str, username: 
     
     print(f"{Colors.CYAN}This is a FIRST-TIME RELEASE for '{package_name}'{Colors.RESET}\n")
     
-    print("To publish to PyPI using GitHub Actions (OIDC), you need to:")
-    print(f"\n{Colors.BRIGHT_YELLOW}1. Add a Pending Publisher on PyPI:{Colors.RESET}")
+    # Auto-create GitHub environment
+    owner, repo = get_github_repo_info(repo_path)
+    if owner and repo:
+        create_github_environment(repo_path, owner, repo, "pypi")
+        print(f"{Colors.GREEN}✓ Step 1/2 complete: GitHub environment created{Colors.RESET}")
+    else:
+        print(f"{Colors.YELLOW}⚠ Could not detect GitHub repo info{Colors.RESET}")
+    
+    print(f"\n{Colors.BRIGHT_YELLOW}Final Step - Add Pending Publisher on PyPI:{Colors.RESET}")
     print(f"   Visit: {Colors.BRIGHT_CYAN}https://pypi.org/manage/account/publishing/{Colors.RESET}")
     print(f"   \n   Fill in:")
     print(f"   • PyPI Project Name: {Colors.GREEN}{package_name}{Colors.RESET}")
-    print(f"   • Owner: {Colors.GREEN}{username}{Colors.RESET}")
-    print(f"   • Repository name: {Colors.GREEN}{package_name}{Colors.RESET}")
+    print(f"   • Owner: {Colors.GREEN}{owner or username}{Colors.RESET}")
+    print(f"   • Repository name: {Colors.GREEN}{repo or package_name}{Colors.RESET}")
     print(f"   • Workflow name: {Colors.GREEN}publish.yml{Colors.RESET}")
     print(f"   • Environment name: {Colors.GREEN}pypi{Colors.RESET}")
     
-    print(f"\n{Colors.BRIGHT_YELLOW}2. Create GitHub Environment:{Colors.RESET}")
-    print(f"   Visit: {Colors.BRIGHT_CYAN}https://github.com/{username}/{package_name}/settings/environments{Colors.RESET}")
-    print(f"   \n   Create environment named: {Colors.GREEN}pypi{Colors.RESET}")
-    print(f"   (Optional: Add protection rules if desired)")
-    
-    print(f"\n{Colors.BRIGHT_YELLOW}3. How it works:{Colors.RESET}")
+    print(f"\n{Colors.BRIGHT_YELLOW}How it works:{Colors.RESET}")
     print("   • You create a GitHub Release")
     print("   • Workflow runs automatically")
     print("   • PyPI verifies the workflow via OIDC")
