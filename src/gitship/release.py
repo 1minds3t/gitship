@@ -1460,8 +1460,8 @@ def _main_logic(repo_path: Path):
                         
                         from . import pypi
                         pkg_name = pypi.read_package_name(repo_path) or repo_path.name
-                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
-                        smart_suffix = "Initial Release" if is_first_release else suggested_title
+                        # Only suggest Initial Release if there are no previous tags
+                        smart_suffix = "Initial Release" if not prev_tag else suggested_title
                         
                         final_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
                         write_changelog(repo_path, final_notes, current_ver)
@@ -1496,8 +1496,7 @@ def _main_logic(repo_path: Path):
                     if not notes:
                         print("   ! No changelog found. Opening editor...")
                         # FIX: Provide default title and unpack tuple
-                        is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
-                        default_suffix = "Initial Release" if is_first_release else "Release"
+                        default_suffix = "Release"
                         notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                         
                         # NOW update changelog with the notes user just wrote
