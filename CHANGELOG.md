@@ -7,14 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] — 2026-02-15
 
-The "Atomic Workflow" Update - Interactive Ops, Licensing & Docs
+The "Atomic Workflow" Update - Interactive Operations & AI-Ready Foundation
+
+## 🚀 Major Feature Release: The "Atomic Workflow" Engine
+
+This release transforms Gitship from a collection of scripts into a robust Git orchestration platform with intelligent automation and safety guarantees.
+
+### 🌟 Key Highlights
+
+**Atomic GitOps Engine:** All operations now use a safety layer that automatically stashes and restores ignorable files (translations, configs, build artifacts) to prevent "dirty tree" errors during context switches.
+
+**Interactive Commit & Release Builders:** Both workflows now feature 3-step interactive builders:
+- Conventional commit type selection (feat/fix/docs/etc)
+- Custom title with smart suggestions
+- Editor for detailed notes with auto-generated breakdown appended
+- Full markdown support with preserved headers
+
+**Pre-Release Review:** Before generating changelogs, see a full commit review with descriptions and statistics - helps write better release notes and prevents blind releases.
+
+**PyPI Version Sync:** Release workflow now compares against PyPI's latest version (not just local git tags) to ensure accurate changelog ranges.
+
+### 🛠 New Features
+
+**License Compliance Manager:**
+- Auto-fetch dependency licenses from PyPI with GitHub fallback
+- Generate `THIRD_PARTY_NOTICES.txt` and `MANIFEST.in`
+- Auto-sync `[tool.setuptools]` license-files in `pyproject.toml`
+- Selective optional dependency group fetching
+- Project license generator (MIT, Apache-2.0, BSD-3-Clause, AGPL-3.0)
+
+**Interactive Merge Suite:**
+- Guided conflict resolution with state caching
+- Pause and resume complex merges without losing progress
+- Semantic merge messages with categorized file statistics
+
+**Documentation Tools:**
+- Interactive README.md section editor (parse, edit, reorder, remove)
+- Safe editing with automatic `.bak` creation
+- Programmatic `.gitignore` management
+
+**Smart Sync Command:**
+- Unified `gitship sync`: Pull (rebase) + Push + Stale remote pruning in one flow
+- Atomic operations prevent translation file conflicts
+
+### 📈 Improvements
+
+- Condensed diff exports with `--unified=1` (up to 70% smaller files)
+- Semantic commit/merge messages with detailed file categorization
+- Dependency scanner with project-specific ignore lists
+- Branch management with redundant branch detection & bulk cleanup
+
+### 🔧 New Commands
+
+- `gitship merge` / `resolve` - Interactive merge and conflict resolution
+- `gitship sync` - Unified sync workflow
+- `gitship licenses` - Fetch and manage dependency licenses
+- `gitship ignore` - Programmatic `.gitignore` management
+- `gitship docs --edit` - Interactive documentation editor
+
+### 🎯 Foundation for AI Integration
+
+This release establishes the groundwork for AI-assisted workflows:
+- Structured commit/review data for LLM consumption
+- Non-interactive mode scaffolding for automation
+- JSON-ready outputs for AI processing
+
+#
+#
+## 🚀 Major Feature Release: The "Atomic Workflow" Engine
+This release transforms Gitship from a collection of scripts into a robust Git orchestration platform.
+
+### 🌟 Key Highlights
+- **Atomic GitOps Engine:** All operations now use a safety layer...
+- **Interactive Merge Suite:** A new guided conflict resolution workflow...
+
+### 🛠 New Commands
+- `gitship merge` / `resolve`: Interactive merge and conflict resolution
+- `gitship sync`: Unified sync workflow
+
+---
 
 **📝 Code Changes:**
 - UPDATE: src/gitship/cli.py (284 lines changed)
 - UPDATE: src/gitship/commit.py (647 lines changed)
 - NEW: src/gitship/gitignore.py (259 lines changed)
 - NEW: src/gitship/licenses.py (1200 lines changed)
-- UPDATE: src/gitship/release.py (216 lines changed)
+- UPDATE: src/gitship/release.py (434 lines changed)
+- UPDATE: src/gitship/review.py (31 lines changed)
 
 **📚 Documentation:**
 - README.md (210 lines)
@@ -26,10 +105,13 @@ The "Atomic Workflow" Update - Interactive Ops, Licensing & Docs
 - pyproject.toml (4 lines)
 
 **Additional Changes:**
+- fix: This will now properly display the commit review before generating the changelog.
+- feat: integrate pre-release review and PyPI version sync
+- fix: preserve markdown headers in release notes and show preview before editor
 - feat: enhance release workflow with interactive notes builder
 - feat: add license manager, interactive docs editor, and enhanced commit workflow
 
-_24 files changed, 8073 insertions(+), 555 deletions(-)_
+_26 files changed, 8307 insertions(+), 596 deletions(-)_
 
 ## [0.2.5] — 2026-02-14
 
