@@ -14,6 +14,14 @@ from datetime import datetime
 from typing import List, Optional
 import logging
 
+try:
+    from gitship.gitops import atomic_git_operation, stash_ignored_changes, restore_latest_stash
+except ImportError:
+    # Fallback if gitops isn't available
+    atomic_git_operation = None
+    stash_ignored_changes = None
+    restore_latest_stash = None
+
 
 class GitCraftLogger:
     """Simple logger for gitcraft operations."""
@@ -286,7 +294,15 @@ def main_with_args(repo_path_str: str, commit_sha: str):
         files_str = '", "'.join(selected_files)
         commit_message = f'Revert "{files_str}" to state before {commit_sha} (parent: {parent_sha[:8]})'
         
-        result = run_git_command(["commit", "-m", commit_message, "--quiet"], cwd=repo_path)
+        if atomic_git_operation:
+            result = atomic_git_operation(
+                repo_path=repo_path,
+                git_command=["commit", "-m", commit_message, "--quiet"],
+                description=f"commit revert of files from {commit_sha}"
+            )
+        else:
+            result = run_git_command(["commit", "-m", commit_message, "--quiet"], cwd=repo_path)
+        
         if result.returncode != 0:
             logger.error(f"Failed to commit changes for {selected_files}")
             sys.exit(1)
@@ -297,7 +313,15 @@ def main_with_args(repo_path_str: str, commit_sha: str):
         branch = get_branch_name(repo_path)
         logger.info(f"Pushing new commit to origin/{branch}...")
         
-        result = run_git_command(["push", "origin", f"HEAD:{branch}", "--quiet"], cwd=repo_path)
+        if atomic_git_operation:
+            result = atomic_git_operation(
+                repo_path=repo_path,
+                git_command=["push", "origin", f"HEAD:{branch}", "--quiet"],
+                description=f"push revert to origin/{branch}"
+            )
+        else:
+            result = run_git_command(["push", "origin", f"HEAD:{branch}", "--quiet"], cwd=repo_path)
+        
         if result.returncode != 0:
             logger.error(f"Failed to push new commit to origin/{branch}")
         else:

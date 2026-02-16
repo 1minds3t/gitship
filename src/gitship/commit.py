@@ -14,6 +14,13 @@ from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 import re
 
+try:
+    from gitship.gitops import atomic_git_operation, has_ignored_changes
+except ImportError:
+    # Fallback if gitops not available yet
+    atomic_git_operation = None
+    has_ignored_changes = None
+
 
 # ANSI color codes
 class Colors:
@@ -73,6 +80,18 @@ class ChangeAnalyzer:
     
     def analyze_changes(self) -> Dict:
         """Analyze all changes in the repository."""
+        # CRITICAL: Reset changes before re-analyzing
+        self.changes = {
+            'code': [],
+            'translations': defaultdict(list),
+            'tests': [],
+            'docs': [],
+            'config': [],
+            'other': [],
+            'renames': []
+        }
+        self.translation_stats = {}
+        
         # Get all files first
         result = self.run_git(["status", "--porcelain"])
         if result.returncode != 0:
@@ -665,15 +684,16 @@ def show_diff_menu(analyzer: ChangeAnalyzer, category: str, files: List[Dict]):
     print("  1. Summary only (--shortstat)")
     print("  2. File list with stats (--stat)")
     print("  3. Full diff (--patch)")
+    print("  4. Export diff to file")
     
     # Add special option for renames
     if files and 'old' in files[0]:
-        print("  4. Stage renames properly (git rm + git add)")
+        print("  5. Stage renames properly (git rm + git add)")
+        print("  6. Back to main menu")
+        max_choice = 6
+    else:
         print("  5. Back to main menu")
         max_choice = 5
-    else:
-        print("  4. Back to main menu")
-        max_choice = 4
     
     print()
     
@@ -689,7 +709,9 @@ def show_diff_menu(analyzer: ChangeAnalyzer, category: str, files: List[Dict]):
         show_stat(analyzer, files)
     elif choice == '3':
         show_full_diff(analyzer, files)
-    elif choice == '4' and max_choice == 5:
+    elif choice == '4':
+        export_diff_to_file(analyzer, files, category)
+    elif choice == '5' and max_choice == 6:
         # Stage renames properly
         stage_renames(analyzer, files)
     elif choice == str(max_choice):
@@ -798,10 +820,20 @@ def show_shortstat(analyzer: ChangeAnalyzer, files: List[Dict]):
     paths = [f['path'] for f in files]
     
     # Show shortstat for modified files
-    modified_paths = [f['path'] for f in files if f['status'] in ('M', 'MM')]
+    modified_paths = [f['path'] for f in files if f['status'].strip() in ('M', 'MM') or 'M' in f['status']]
     if modified_paths:
-        result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
-        if result.returncode == 0 and result.stdout:
+        # Try unstaged changes first
+        result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
+        
+        # If no unstaged changes, try staged
+        if result.returncode != 0 or not result.stdout.strip():
+            result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
+        
+        # If still nothing, try against HEAD
+        if result.returncode != 0 or not result.stdout.strip():
+            result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
+        
+        if result.returncode == 0 and result.stdout.strip():
             print("\nModified files:")
             print(result.stdout)
     
@@ -813,6 +845,300 @@ def show_shortstat(analyzer: ChangeAnalyzer, files: List[Dict]):
         print(f"\nNew files: {new_count}")
     if deleted_count > 0:
         print(f"Deleted files: {deleted_count}")
+    
+    print()
+    input("Press Enter to continue...")
+
+
+def export_diff_to_file(analyzer: ChangeAnalyzer, files: List[Dict], category: str = "changes"):
+    """Export the diff to a text file for easier review."""
+    from gitship.config import load_config
+    import datetime
+    
+    print(f"\n{'=' * 80}")
+    print("EXPORT DIFF TO FILE")
+    print("=" * 80)
+    
+    # Ask for format preference
+    print("\nChoose export format:")
+    print("  1. Condensed (--unified=1, 60-70% smaller)")
+    print("  2. Full context (default git diff)")
+    print()
+    
+    try:
+        format_choice = input("Format (1/2, default=1): ").strip() or "1"
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return
+    
+    use_condensed = format_choice == "1"
+    
+    # Get export path from config
+    config = load_config()
+    export_base = Path(config.get('export_path', Path.home() / "gitship_exports"))
+    export_base.mkdir(parents=True, exist_ok=True)
+    
+    # Generate filename with timestamp and category
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode_suffix = "_condensed" if use_condensed else "_full"
+    filename = f"diff_{category}{mode_suffix}_{timestamp}.txt"
+    export_path = export_base / filename
+    
+    print(f"\nExporting to: {export_path}")
+    print(f"Files to export: {len(files)}")
+    print(f"Format: {'Condensed (minimal context)' if use_condensed else 'Full context'}")
+    
+    try:
+        with open(export_path, 'w', encoding='utf-8') as f:
+            # Write header
+            f.write("=" * 80 + "\n")
+            f.write(f"GITSHIP DIFF EXPORT - {category.upper()}\n")
+            f.write(f"Format: {'CONDENSED (unified=1)' if use_condensed else 'FULL CONTEXT'}\n")
+            f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Repository: {analyzer.repo_path}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # Write file list
+            f.write(f"FILES ({len(files)}):\n")
+            f.write("-" * 80 + "\n")
+            for item in files:
+                if 'old' in item:
+                    f.write(f"  RENAME: {item['old']} → {item['new']}\n")
+                else:
+                    status = item.get('status', '??')
+                    f.write(f"  {status:4s} {item['path']}\n")
+            f.write("\n")
+            
+            # Write stats
+            f.write("STATISTICS:\n")
+            f.write("-" * 80 + "\n")
+            
+            # Check if these are renames
+            if files and 'old' in files[0]:
+                f.write(f"{len(files)} file(s) renamed\n\n")
+            else:
+                paths = [f['path'] for f in files]
+                modified_paths = [f['path'] for f in files if f['status'].strip() in ('M', 'MM') or 'M' in f['status']]
+                
+                if modified_paths:
+                    result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
+                    if result.returncode != 0 or not result.stdout.strip():
+                        result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
+                    if result.returncode != 0 or not result.stdout.strip():
+                        result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        f.write(result.stdout + "\n")
+                
+                new_count = sum(1 for item in files if item['status'] in ('??', 'A'))
+                deleted_count = sum(1 for item in files if item['status'] == 'D')
+                
+                if new_count > 0:
+                    f.write(f"New files: {new_count}\n")
+                if deleted_count > 0:
+                    f.write(f"Deleted files: {deleted_count}\n")
+            
+            f.write("\n")
+            
+            # Write full diff
+            f.write("FULL DIFF:\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # Build git diff arguments
+            diff_args = ["diff"]
+            if use_condensed:
+                diff_args.append("--unified=1")  # Only minimal context, no function-context!
+            
+            # Handle renames differently
+            if files and 'old' in files[0]:
+                for item in files:
+                    f.write(f"\n{'=' * 80}\n")
+                    f.write(f"RENAME: {item['old']} → {item['new']}\n")
+                    f.write("=" * 80 + "\n\n")
+                    
+                    try:
+                        # Get old content
+                        result_old = analyzer.run_git(["show", f"HEAD:{item['old']}"])
+                        old_content = result_old.stdout if result_old.returncode == 0 else ""
+                        
+                        # Get new content
+                        new_file = analyzer.repo_path / item['new']
+                        with open(new_file, 'r', encoding='utf-8', errors='ignore') as nf:
+                            new_content = nf.read()
+                        
+                        # Generate diff with condensed context
+                        import difflib
+                        old_lines = old_content.splitlines(keepends=True)
+                        new_lines = new_content.splitlines(keepends=True)
+                        
+                        n_context = 1 if use_condensed else 3
+                        diff = difflib.unified_diff(
+                            old_lines, new_lines,
+                            fromfile=item['old'],
+                            tofile=item['new'],
+                            lineterm='',
+                            n=n_context
+                        )
+                        
+                        # Collect diff lines and filter in condensed mode
+                        diff_lines = list(diff)
+                        
+                        if use_condensed:
+                            filtered_diff = []
+                            prev_blank = False
+                            
+                            for line in diff_lines:
+                                # Check if blank change line
+                                is_blank_change = line in ('+', '-', '+ ', '- ', '+\t', '-\t')
+                                
+                                # Skip consecutive blank changes
+                                if is_blank_change and prev_blank:
+                                    continue
+                                
+                                # Skip metadata
+                                if (line.startswith('index ') or 
+                                    line.startswith('new file mode') or 
+                                    line.startswith('old mode')):
+                                    continue
+                                
+                                filtered_diff.append(line)
+                                prev_blank = is_blank_change
+                            
+                            diff_lines = filtered_diff
+                        
+                        for line in diff_lines:
+                            f.write(line + "\n")
+                    except Exception as e:
+                        f.write(f"Error generating diff: {e}\n")
+            else:
+                # Regular files - process each file separately for cleaner output
+                paths = [f['path'] for f in files]
+                
+                for file_info in files:
+                    path = file_info['path']
+                    status = file_info.get('status', '??')
+                    
+                    # File header
+                    f.write(f"\n{'=' * 80}\n")
+                    f.write(f"FILE: {path} [{status}]\n")
+                    f.write("=" * 80 + "\n\n")
+                    
+                    # Handle untracked/new files differently
+                    if status in ('??', 'A'):
+                        # For new files, show the full content (not a diff)
+                        try:
+                            new_file = analyzer.repo_path / path
+                            if new_file.exists() and new_file.is_file():
+                                with open(new_file, 'r', encoding='utf-8', errors='ignore') as nf:
+                                    content = nf.read()
+                                
+                                # In condensed mode, remove excessive blank lines
+                                if use_condensed:
+                                    lines = content.split('\n')
+                                    filtered_lines = []
+                                    prev_blank = False
+                                    
+                                    for line in lines:
+                                        is_blank = not line.strip()
+                                        
+                                        # Skip consecutive blank lines
+                                        if is_blank and prev_blank:
+                                            continue
+                                        
+                                        filtered_lines.append(line)
+                                        prev_blank = is_blank
+                                    
+                                    content = '\n'.join(filtered_lines)
+                                    
+                                f.write(f"NEW FILE - Full content:\n")
+                                f.write("-" * 80 + "\n")
+                                f.write(content)
+                                f.write("\n\n")
+                            else:
+                                f.write("(file not found or not readable)\n\n")
+                        except Exception as e:
+                            f.write(f"Error reading file: {e}\n\n")
+                    else:
+                        # For modified files, use git diff
+                        # Try unstaged diff first
+                        result = analyzer.run_git(diff_args + ["--", path])
+                        
+                        # If no unstaged changes, try staged
+                        if result.returncode != 0 or not result.stdout.strip():
+                            result = analyzer.run_git(diff_args + ["--staged", "--", path])
+                        
+                        # If still nothing, try against HEAD
+                        if result.returncode != 0 or not result.stdout.strip():
+                            result = analyzer.run_git(diff_args + ["HEAD", "--", path])
+                        
+                        if result.returncode == 0 and result.stdout.strip():
+                            # Strip ANSI codes before writing
+                            clean_output = strip_ansi(result.stdout)
+                            
+                            # Clean up diff output in condensed mode
+                            if use_condensed:
+                                lines = clean_output.split('\n')
+                                filtered_lines = []
+                                prev_blank = False
+                                
+                                for line in lines:
+                                    # Check if this is a blank change line (just + or - with no content)
+                                    is_blank_change = line in ('+', '-', '+ ', '- ', '+\t', '-\t')
+                                    
+                                    # Skip consecutive blank changes
+                                    if is_blank_change and prev_blank:
+                                        continue
+                                    
+                                    # Skip index, mode, and other metadata lines
+                                    if (line.startswith('index ') or 
+                                        line.startswith('new file mode') or 
+                                        line.startswith('old mode') or
+                                        line.startswith('deleted file mode')):
+                                        continue
+                                    
+                                    filtered_lines.append(line)
+                                    prev_blank = is_blank_change
+                                
+                                clean_output = '\n'.join(filtered_lines)
+                            
+                            f.write(clean_output)
+                            f.write("\n\n")
+                        else:
+                            f.write("(no changes detected by git)\n\n")
+        
+        # Post-process in condensed mode: remove blank lines
+        if use_condensed:
+            with open(export_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Remove blank lines AND lines that are just + or - 
+            lines = content.split('\n')
+            filtered = []
+            
+            for line in lines:
+                # Skip completely blank lines
+                if not line.strip():
+                    continue
+                
+                # Skip lines that are ONLY + or - (with optional whitespace)
+                stripped = line.strip()
+                if stripped in ('+', '-'):
+                    continue
+                
+                filtered.append(line)
+            
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(filtered))
+        
+        print(f"\n✅ Diff exported successfully!")
+        print(f"   File: {export_path}")
+        print(f"   Size: {export_path.stat().st_size:,} bytes")
+        
+        if use_condensed:
+            print(f"   Mode: Condensed (--unified=1, blank lines removed)")
+        
+    except Exception as e:
+        print(f"\n❌ Error exporting diff: {e}")
     
     print()
     input("Press Enter to continue...")
@@ -919,10 +1245,30 @@ def show_stat(analyzer: ChangeAnalyzer, files: List[Dict]):
                 print(f"  [NEW FILE - {lines} lines]")
             except:
                 print("  [NEW FILE]")
-        elif status in ('M', 'MM'):
-            result = analyzer.run_git(["diff", "--stat", "HEAD", filepath])
-            if result.returncode == 0:
-                print(f"  {result.stdout.strip()}")
+        elif status in ('M', 'MM', ' M', 'M '):
+            # Try unstaged changes first (working tree vs index)
+            result = analyzer.run_git(["diff", "--stat", filepath])
+            
+            # If no unstaged changes, try staged changes
+            if result.returncode != 0 or not result.stdout.strip():
+                result = analyzer.run_git(["diff", "--stat", "--staged", filepath])
+            
+            # If still nothing, try against HEAD
+            if result.returncode != 0 or not result.stdout.strip():
+                result = analyzer.run_git(["diff", "--stat", "HEAD", filepath])
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse the stat output to just show the summary line
+                stat_lines = result.stdout.strip().split('\n')
+                # The last line usually has the summary (e.g., "1 file changed, 2 insertions(+), 2 deletions(-)")
+                # But we want the file-specific line which might be the first or only line
+                for line in stat_lines:
+                    if filepath in line or '|' in line:
+                        print(f"  {line}")
+                        break
+                else:
+                    # Just print all of it if we can't find the right line
+                    print(f"  {result.stdout.strip()}")
     
     print()
     input("Press Enter to continue...")
@@ -1037,22 +1383,39 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
             except Exception as e:
                 print(f"  (Could not read: {e})")
         
-        elif status in ('M', 'MM'):
-            # Use git's colored diff output
-            result = analyzer.run_git(["diff", "--color=always", "HEAD", filepath])
+        elif status in ('M', 'MM', ' M', 'M '):
+            # Determine which diff to show based on status
+            # ' M' = unstaged only -> use 'git diff'
+            # 'M ' = staged only -> use 'git diff --staged'  
+            # 'MM' = both staged and unstaged -> show unstaged (working tree)
+            # 'M' = generic modified -> try unstaged first
+            
+            # Try unstaged changes first (working tree vs index)
+            result = analyzer.run_git(["diff", "--color=always", filepath])
+            
+            # If no unstaged changes, try staged changes
+            if result.returncode != 0 or not result.stdout.strip():
+                result = analyzer.run_git(["diff", "--color=always", "--staged", filepath])
+            
+            # If still nothing, try against HEAD
+            if result.returncode != 0 or not result.stdout.strip():
+                result = analyzer.run_git(["diff", "--color=always", "HEAD", filepath])
+            
             if result.returncode == 0 and result.stdout:
-                # Strip git metadata headers but keep colors
+                # Strip only the git file headers but keep hunk headers (@@ lines) and content
                 lines = result.stdout.splitlines()
                 cleaned_lines = []
                 for line in lines:
                     plain = strip_ansi(line)
-                    # Skip metadata
-                    if plain.startswith(('diff --git', 'index ', '@@')):
+                    # Skip only the file metadata headers, keep everything else including @@ hunk headers
+                    if plain.startswith(('diff --git', 'index ', '---', '+++')):
                         continue
                     cleaned_lines.append(line)
                 
                 if cleaned_lines:
                     print('\n'.join(cleaned_lines))
+                else:
+                    print(f"{Colors.DIM}(no diff content){Colors.RESET}")
             else:
                 print(f"{Colors.DIM}(no changes){Colors.RESET}")
     
@@ -1341,8 +1704,16 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             print(f"Error staging files: {result.stderr}")
             return False
         
-        # Commit
-        result = analyzer.run_git(["commit", "-m", marked_message])
+        # Commit with atomic operation to handle ignorable changes
+        if atomic_git_operation:
+            result = atomic_git_operation(
+                repo_path=Path.cwd(),
+                git_command=["commit", "-m", marked_message],
+                description="commit"
+            )
+        else:
+            result = analyzer.run_git(["commit", "-m", marked_message])
+        
         if result.returncode != 0:
             print(f"Error committing: {result.stderr}")
             return False
@@ -1355,7 +1726,17 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             push = input("\nPush to remote? (y/n): ").strip().lower()
             if push in ('y', 'yes'):
                 print(f"\n{Colors.CYAN}Pushing to remote...{Colors.RESET}")
-                push_result = analyzer.run_git(["push"])
+                
+                # Use atomic operation for push too
+                if atomic_git_operation:
+                    push_result = atomic_git_operation(
+                        repo_path=Path.cwd(),
+                        git_command=["push"],
+                        description="push"
+                    )
+                else:
+                    push_result = analyzer.run_git(["push"])
+                
                 if push_result.returncode == 0:
                     print(f"{Colors.GREEN}✓ Pushed to remote{Colors.RESET}")
                 else:
@@ -1479,7 +1860,7 @@ def clean_untracked_files(analyzer: ChangeAnalyzer):
         print("\n\nCancelled.")
         return
     
-    if confirm != 'yes':
+    if confirm not in ('yes', 'y'):
         print("Deletion cancelled.")
         return
     

@@ -13,12 +13,12 @@ from typing import Optional
 
 
 try:
-    from gitship import check, fix, review, release, commit, branch, publish, docs
+    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
     sys.path.insert(0, str(Path(__file__).parent / "src"))
-    from gitship import check, fix, review, release, commit, docs
+    from gitship import check, fix, review, release, commit, docs, sync, amend
     from gitship.config import load_config, get_default_export_path
 
 
@@ -40,11 +40,17 @@ def show_menu(repo_path: Path):
     print("  8. publish  - Create GitHub repo and push (with identity verification)")
     print("  9. deps     - Scan for and add missing dependencies to pyproject.toml")
     print("  10. docs    - Generate or update README.md")
+    print("  11. resolve - Interactive merge conflict resolver")
+    print("  12. merge   - Merge branches interactively")
+    print("  13. pull    - Pull changes from remote (with rebase)")
+    print("  14. push    - Push changes to remote")
+    print("  15. sync    - Pull and push in one operation")
+    print("  16. amend   - Amend last commit with smart message")
     print("  0. exit     - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-9): ").strip()
+        choice = input("Enter your choice (0-16): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -78,7 +84,43 @@ def show_menu(repo_path: Path):
         publish.main_with_repo(repo_path)
     elif choice == "9":
         from gitship import deps
-        deps.main_with_repo(repo_path)
+        print("\nDependency Management:")
+        print("  1. Scan and add missing dependencies")
+        print("  2. List permanently ignored packages")
+        print("  3. Add package to ignore list")
+        print("  4. Remove package from ignore list")
+        sub = input("Choice (1-4): ").strip()
+        
+        if sub == "1":
+            deps.main_with_repo(repo_path)
+        elif sub == "2":
+            from gitship.config import list_ignored_dependencies_for_project
+            list_ignored_dependencies_for_project(repo_path)
+            input("\nPress Enter to continue...")
+        elif sub == "3":
+            pkg = input("Package name to ignore: ").strip()
+            if pkg:
+                from gitship.config import add_ignored_dependency
+                add_ignored_dependency(pkg, repo_path)
+                input("\nPress Enter to continue...")
+        elif sub == "4":
+            from gitship.config import get_ignored_dependencies, remove_ignored_dependency
+            ignored = get_ignored_dependencies(repo_path)
+            if not ignored:
+                print("\n⚠️  No packages in ignore list for this project")
+                input("\nPress Enter to continue...")
+            else:
+                print(f"\nCurrently ignored:")
+                for i, p in enumerate(sorted(ignored), 1):
+                    print(f"  {i}. {p}")
+                pkg = input("\nPackage name or number to unignore: ").strip()
+                if pkg.isdigit():
+                    idx = int(pkg) - 1
+                    if 0 <= idx < len(ignored):
+                        pkg = sorted(ignored)[idx]
+                if pkg in ignored:
+                    remove_ignored_dependency(pkg, repo_path)
+                    input("\nPress Enter to continue...")
     elif choice == "10":
         from gitship import docs
         print("\nDocs Options:")
@@ -91,6 +133,20 @@ def show_menu(repo_path: Path):
             src = input("Source file path: ").strip()
             if src:
                 docs.main_with_args(repo_path, source=src)
+    elif choice == "11":
+        from gitship import resolve_conflicts
+        resolve_conflicts.main()
+    elif choice == "12":
+        from gitship import merge
+        merge.main_with_repo(repo_path)
+    elif choice == "13":
+        sync.main_with_repo(repo_path, "pull")
+    elif choice == "14":
+        sync.main_with_repo(repo_path, "push")
+    elif choice == "15":
+        sync.main_with_repo(repo_path, "sync")
+    elif choice == "16":
+        amend.main_with_repo(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -313,6 +369,23 @@ Commands:
         'deps',
         help='Scan for and add missing dependencies to pyproject.toml'
     )
+    deps_parser.add_argument(
+        '--list-ignored',
+        action='store_true',
+        help='List packages in permanent ignore list for this project'
+    )
+    deps_parser.add_argument(
+        '--add-ignore',
+        type=str,
+        metavar='PACKAGE',
+        help='Add a package to permanent ignore list'
+    )
+    deps_parser.add_argument(
+        '--remove-ignore',
+        type=str,
+        metavar='PACKAGE',
+        help='Remove a package from permanent ignore list'
+    )
     # docs subcommand
     docs_parser = subparsers.add_parser(
         'docs',
@@ -327,6 +400,86 @@ Commands:
         '--source',
         type=str,
         help='Update README from source file'
+    )
+    
+    # resolve subcommand
+    resolve_parser = subparsers.add_parser(
+        'resolve',
+        help='Interactive merge conflict resolver'
+    )
+    
+    # merge subcommand
+    merge_parser = subparsers.add_parser(
+        'merge',
+        help='Merge branches interactively'
+    )
+    merge_parser.add_argument(
+        'branch',
+        nargs='?',
+        help='Branch to merge (interactive if not specified)'
+    )
+    merge_parser.add_argument(
+        '--strategy',
+        choices=['ours', 'theirs'],
+        help='Merge strategy for conflicts'
+    )
+    merge_parser.add_argument(
+        '--no-commit',
+        action='store_true',
+        help='Merge but do not auto-commit'
+    )
+    
+    # Pull command
+    pull_parser = subparsers.add_parser(
+        'pull',
+        help='Pull changes from remote (with rebase)'
+    )
+    pull_parser.add_argument(
+        '--merge',
+        action='store_true',
+        help='Use merge instead of rebase'
+    )
+    pull_parser.add_argument(
+        '--branch',
+        help='Specific branch to pull'
+    )
+    
+    # Push command
+    push_parser = subparsers.add_parser(
+        'push',
+        help='Push changes to remote'
+    )
+    push_parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force push (use with caution!)'
+    )
+    push_parser.add_argument(
+        '--set-upstream',
+        action='store_true',
+        help='Set upstream tracking branch'
+    )
+    
+    # Sync command
+    sync_parser = subparsers.add_parser(
+        'sync',
+        help='Pull and push in one operation'
+    )
+    sync_parser.add_argument(
+        '--merge',
+        action='store_true',
+        help='Use merge instead of rebase for pull'
+    )
+    
+    # Amend command
+    amend_parser = subparsers.add_parser(
+        'amend',
+        help='Amend last commit with smart message generation'
+    )
+    amend_parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='Automatically use smart message without prompting'
     )
 
     args = parser.parse_args()
@@ -394,10 +547,40 @@ Commands:
         publish.publish_repository(repo_path)
     elif args.command == 'deps':
         from gitship import deps
-        deps.main_with_repo(repo_path)
+        from gitship.config import list_ignored_dependencies_for_project, add_ignored_dependency, remove_ignored_dependency
+        
+        if args.list_ignored:
+            list_ignored_dependencies_for_project(repo_path)
+        elif args.add_ignore:
+            add_ignored_dependency(args.add_ignore, repo_path)
+            print(f"✓ Added '{args.add_ignore}' to permanent ignore list for this project")
+        elif args.remove_ignore:
+            remove_ignored_dependency(args.remove_ignore, repo_path)
+        else:
+            deps.main_with_repo(repo_path)
     elif args.command == 'docs':
         from gitship import docs
         docs.main_with_args(repo_path, source=args.source, generate=args.generate)
+    
+    elif args.command == 'resolve':
+        from gitship import resolve_conflicts
+        resolve_conflicts.main()
+    
+    elif args.command == 'merge':
+        from gitship import merge
+        if args.branch:
+            # Direct merge
+            strategy = args.strategy if hasattr(args, 'strategy') else None
+            merge.merge_branch(repo_path, args.branch, strategy)
+        else:
+            # Interactive
+            merge.main_with_repo(repo_path)
+    
+    elif args.command in ['pull', 'push', 'sync']:
+        sync.main_with_repo(repo_path, args.command)
+    
+    elif args.command == 'amend':
+        amend.main_with_repo(repo_path)
         
     else:
         # No command specified, show menu

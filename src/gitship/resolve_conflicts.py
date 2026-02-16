@@ -15,7 +15,7 @@ def run_git(args, check=True):
     """Run git command and return stdout."""
     try:
         res = subprocess.run(
-            ["git"] + args, capture_output=True, text=True, check=check
+            ["git"] + args, capture_output=True, text=True, check=check, encoding='utf-8', errors='replace'
         )
         return res.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -103,37 +103,119 @@ def resolve_conflict_interactive(filepath: str):
     print(f"\n📝 Found {len(blocks)} conflict(s) in {filepath}")
     print("\nHow do you want to resolve this file?")
     print("  V - VIEW full diff first")
+    print("  F - Save full diff to FILE")
     print("  O - Keep ALL blocks as OURS (local)")
     print("  T - Keep ALL blocks as THEIRS (remote/incoming)")
     print("  B - Resolve BLOCK-BY-BLOCK (choose per conflict)")
     print("  S - Skip this file")
     print("  Q - Quit resolver")
     
-    choice = input("\nChoice (V/O/T/B/S/Q): ").strip().upper()
+    choice = input("\nChoice (V/F/O/T/B/S/Q): ").strip().upper()
     
     if choice == 'V':
         # Show diff
         diff_output = run_git(["diff", filepath], check=False)
-        line_count = len(diff_output.split('\n'))
+        lines = diff_output.split('\n')
+        line_count = len(lines)
         
-        if line_count > 50:
-            # Write to temp file and open in editor
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.diff', delete=False) as tf:
-                tf.write(diff_output)
-                temp_path = tf.name
+        print(f"\n📊 Diff has {line_count} lines")
+        
+        # Always show preview first (first 50 lines)
+        preview_lines = min(50, line_count)
+        print(f"\n📋 Preview (first {preview_lines} lines):")
+        print("─" * 80)
+        print('\n'.join(lines[:preview_lines]))
+        if line_count > preview_lines:
+            print(f"\n... ({line_count - preview_lines} more lines)")
+        print("─" * 80)
+        
+        if line_count > 100:
+            print("\n🔍 Full diff viewing options:")
+            print("  1. less - Pager (searchable, press q to quit)")
+            print("  2. cat  - Print all to terminal")
+            print("  3. nano - Text editor")
+            print("  4. vim  - Vim editor (if you like pain)")
+            print("  5. Save to file and skip viewing")
+            print("  6. Continue with just the preview")
+            view_choice = input("\nChoice (1-6, default=1): ").strip() or '1'
             
-            editor = os.environ.get('EDITOR', 'nano')
-            print(f"\n📝 Opening diff in {editor}...")
-            subprocess.call([editor, temp_path])
-            os.unlink(temp_path)
-        else:
-            # Just print it
-            print("\n" + "─" * 80)
-            print(diff_output)
-            print("─" * 80)
+            if view_choice == '1':
+                # Use less
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.diff', delete=False, encoding='utf-8', errors='replace') as tf:
+                    tf.write(diff_output)
+                    temp_path = tf.name
+                
+                print(f"\n📖 Opening in less...")
+                print("   💡 Controls: arrows/pgup/pgdn to scroll, / to search, q to quit")
+                print("   ⏳ Starting in 3 seconds...")
+                import time
+                time.sleep(3)
+                subprocess.call(['less', '-R', temp_path])
+                os.unlink(temp_path)
+            
+            elif view_choice == '2':
+                # Cat it all
+                print("\n" + "─" * 80)
+                print(diff_output)
+                print("─" * 80)
+            
+            elif view_choice == '3':
+                # Nano
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.diff', delete=False, encoding='utf-8', errors='replace') as tf:
+                    tf.write(diff_output)
+                    temp_path = tf.name
+                
+                print(f"\n📖 Opening in nano...")
+                print("   💡 Controls: Ctrl+X to exit")
+                print("   ⏳ Starting in 2 seconds...")
+                import time
+                time.sleep(2)
+                subprocess.call(['nano', temp_path])
+                os.unlink(temp_path)
+            
+            elif view_choice == '4':
+                # Vim
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.diff', delete=False, encoding='utf-8', errors='replace') as tf:
+                    tf.write(diff_output)
+                    temp_path = tf.name
+                
+                print(f"\n📖 Opening in vim...")
+                print("   💡 Controls: :q to quit (or :q! to force quit)")
+                print("   ⏳ Starting in 3 seconds... (good luck!)")
+                import time
+                time.sleep(3)
+                subprocess.call(['vim', temp_path])
+                os.unlink(temp_path)
+            
+            elif view_choice == '5':
+                # Save to file
+                output_file = f"conflict_{Path(filepath).name}.diff"
+                with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                    f.write(diff_output)
+                print(f"\n✓ Saved to: {output_file}")
+            
+            # choice 6 just continues with preview
         
         # Ask again after viewing
+        print("\nNow choose resolution:")
+        print("  O - Keep ALL as OURS (local)")
+        print("  T - Keep ALL as THEIRS (remote/incoming)")
+        print("  B - Resolve BLOCK-BY-BLOCK")
+        print("  S - Skip this file")
+        choice = input("\nChoice (O/T/B/S): ").strip().upper()
+    
+    elif choice == 'F':
+        # Save diff to file
+        diff_output = run_git(["diff", filepath], check=False)
+        output_file = f"conflict_{Path(filepath).name}.diff"
+        with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(diff_output)
+        print(f"\n✓ Saved diff to: {output_file}")
+        
+        # Ask what to do
         print("\nNow choose resolution:")
         print("  O - Keep ALL as OURS (local)")
         print("  T - Keep ALL as THEIRS (remote/incoming)")

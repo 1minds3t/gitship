@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import re
 
-
 # Marker to identify commits made by gitship commit tool
 GITSHIP_COMMIT_MARKER = "[gitship-generated]"
-
 
 def run_git(args: List[str], cwd: Path, check: bool = False) -> str:
     """Run a git command and return output."""
@@ -31,6 +29,57 @@ def run_git(args: List[str], cwd: Path, check: bool = False) -> str:
     except:
         return ""
 
+def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
+    """
+    Get ALL commits since last tag WITHOUT deduplication.
+    
+    This version keeps duplicate commit messages so we can count them.
+    Use this for merge message generation where you want to show "Update X (×4)".
+    """
+    range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
+    
+    log_output = run_git([
+        "log", range_str, 
+        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
+        "--no-merges"
+    ], repo_path)
+    
+    commits = []
+    
+    for commit_block in log_output.split('|||END_COMMIT'):
+        if not commit_block.strip():
+            continue
+            
+        parts = commit_block.split('|||')
+        if len(parts) < 3:
+            continue
+            
+        sha = parts[0].strip()
+        subject = parts[1].strip()
+        full_message = parts[2].strip() if len(parts) > 2 else ""
+        
+        body_parts = full_message.split('\n', 1)
+        body = body_parts[1].strip() if len(body_parts) > 1 else ""
+        
+        # Skip noise but DON'T skip duplicates
+        if any(phrase in subject.lower() for phrase in [
+            "merge", "auto-merge", "sync main", "sync development",
+            "chore: release", "preparing release"
+        ]):
+            continue
+        
+        is_gitship = GITSHIP_COMMIT_MARKER in body or GITSHIP_COMMIT_MARKER in full_message
+        
+        commits.append({
+            'sha': sha,
+            'subject': subject,
+            'body': body,
+            'full_message': full_message,
+            'is_gitship': is_gitship,
+            'is_merge': False
+        })
+    
+    return commits
 
 def is_gitship_commit(commit_sha: str, repo_path: Path) -> bool:
     """Check if a commit was made by gitship commit tool."""

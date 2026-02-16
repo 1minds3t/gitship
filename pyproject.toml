@@ -30,6 +30,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "pyperclip",
     "requests",
     "tomli",
 ]

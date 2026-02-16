@@ -41,17 +41,30 @@ def load_config() -> Dict[str, Any]:
             "export_path": str(get_default_export_path()),
             "auto_push": True,
             "default_commit_count": 10,
+            "project_ignored_deps": {},  # Format: {"project_path": ["dep1", "dep2"]}
+            "project_ignore_patterns": {},  # Format: {"project_path": ["*.po", "*.mo"]}
         }
     
     try:
         with open(config_file, 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+            # Migrate old config format if needed
+            if "ignored_deps" in config and "project_ignored_deps" not in config:
+                print("ℹ Migrating old global ignored_deps to project-specific format...")
+                config["project_ignored_deps"] = {}
+                del config["ignored_deps"]
+            # Add project_ignore_patterns if missing
+            if "project_ignore_patterns" not in config:
+                config["project_ignore_patterns"] = {}
+            return config
     except Exception:
         # Return defaults on error
         return {
             "export_path": str(get_default_export_path()),
             "auto_push": True,
             "default_commit_count": 10,
+            "project_ignored_deps": {},
+            "project_ignore_patterns": {},
         }
 
 
@@ -82,6 +95,83 @@ def set_auto_push(enabled: bool):
     print(f"Auto-push {'enabled' if enabled else 'disabled'}")
 
 
+def add_ignored_dependency(package_name: str, project_path: Path = None):
+    """Add a package to the persistent ignore list for a specific project."""
+    config = load_config()
+    
+    # Determine project identifier (use absolute path as key)
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    
+    # Initialize project_ignored_deps if not present
+    if 'project_ignored_deps' not in config:
+        config['project_ignored_deps'] = {}
+    
+    # Get or create ignore list for this project
+    if project_key not in config['project_ignored_deps']:
+        config['project_ignored_deps'][project_key] = []
+    
+    ignored = set(config['project_ignored_deps'][project_key])
+    ignored.add(package_name)
+    config['project_ignored_deps'][project_key] = sorted(list(ignored))
+    
+    save_config(config)
+    print(f"Dependency '{package_name}' added to ignore list for this project.")
+
+def get_ignored_dependencies(project_path: Path = None) -> list:
+    """Get list of ignored dependencies for a specific project."""
+    config = load_config()
+    
+    # Determine project identifier
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    
+    # Get project-specific ignored deps
+    project_ignored = config.get('project_ignored_deps', {})
+    return project_ignored.get(project_key, [])
+
+
+def remove_ignored_dependency(package_name: str, project_path: Path = None):
+    """Remove a package from the project's ignore list."""
+    config = load_config()
+    
+    # Determine project identifier
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    
+    # Get project-specific ignored deps
+    project_ignored = config.get('project_ignored_deps', {})
+    if project_key in project_ignored:
+        if package_name in project_ignored[project_key]:
+            project_ignored[project_key].remove(package_name)
+            config['project_ignored_deps'] = project_ignored
+            save_config(config)
+            print(f"Dependency '{package_name}' removed from ignore list for this project.")
+        else:
+            print(f"Dependency '{package_name}' was not in the ignore list.")
+    else:
+        print(f"No ignored dependencies for this project.")
+
+
+def list_ignored_dependencies_for_project(project_path: Path = None):
+    """Display ignored dependencies for the current project."""
+    if project_path is None:
+        project_path = Path.cwd()
+    
+    ignored = get_ignored_dependencies(project_path)
+    project_name = project_path.name
+    
+    print(f"\nIgnored dependencies for '{project_name}':")
+    if ignored:
+        for dep in sorted(ignored):
+            print(f"  - {dep}")
+    else:
+        print("  (none)")
+    print()
+
 def show_config():
     """Display current configuration."""
     config = load_config()
@@ -95,6 +185,27 @@ def show_config():
     print(f"  Export Path:        {config.get('export_path', get_default_export_path())}")
     print(f"  Auto-push:          {config.get('auto_push', True)}")
     print(f"  Default Commits:    {config.get('default_commit_count', 10)}")
+    
+    # Show project-specific ignored deps
+    project_ignored = config.get('project_ignored_deps', {})
+    if project_ignored:
+        print("\n  Project-specific ignored dependencies:")
+        for project, deps in project_ignored.items():
+            project_name = Path(project).name
+            print(f"    {project_name}: {', '.join(deps) if deps else '(none)'}")
+    else:
+        print(f"  Ignored Deps:       (none)")
+    
+    # Show project-specific ignore patterns
+    project_patterns = config.get('project_ignore_patterns', {})
+    if project_patterns:
+        print("\n  Project-specific ignore patterns (for atomic git ops):")
+        for project, patterns in project_patterns.items():
+            project_name = Path(project).name
+            print(f"    {project_name}: {', '.join(patterns) if patterns else '(none)'}")
+    else:
+        print(f"  Ignore Patterns:    (defaults: *.po, *.mo)")
+        
     print()
     print("To modify settings:")
     print("  gitship config --set-export-path /path/to/export")
