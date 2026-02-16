@@ -496,12 +496,39 @@ def main_with_args(
 def main_with_repo(repo_path: Path):
     """Interactive mode with prompts for range selection."""
     tags = get_all_tags(repo_path)
-    current_ver = tags[0] if tags else "None"
+    
+    # Try to get PyPI latest version for better comparison
+    pypi_tag = None
+    try:
+        # Import here to avoid circular dependency
+        import sys
+        import requests
+        
+        # Try to read package name from pyproject.toml
+        pyproject = repo_path / "pyproject.toml"
+        if pyproject.exists():
+            content = pyproject.read_text()
+            import re
+            match = re.search(r'name\s*=\s*"([^"]+)"', content)
+            if match:
+                pkg_name = match.group(1)
+                resp = requests.get(f"https://pypi.org/pypi/{pkg_name}/json", timeout=3)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    latest = data.get('info', {}).get('version')
+                    if latest:
+                        pypi_tag = f"v{latest}"
+    except:
+        pass
+    
+    # Use PyPI tag if available, otherwise use git tag
+    current_ver = pypi_tag if pypi_tag else (tags[0] if tags else "None")
+    pypi_note = " (from PyPI)" if pypi_tag else ""
     
     print("\n" + "=" * 60)
     print("REVIEWGIT - Select Range")
     print("=" * 60)
-    print(f"Latest Tag: {current_ver}")
+    print(f"Latest Tag: {current_ver}{pypi_note}")
     print("\nModes:")
     print("  1. Latest Tag -> HEAD   (Review current work)")
     print("  2. Select Tags          (Compare specific releases)")

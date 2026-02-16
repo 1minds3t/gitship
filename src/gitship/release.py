@@ -13,6 +13,8 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+from typing import Optional
+
 
 # Try to import changelog_generator for better changelog generation
 try:
@@ -62,7 +64,92 @@ def get_current_version(repo_path: Path) -> str:
     match = re.search(r'^version\s*=\s*"(.*?)"', content, re.MULTILINE)
     return match.group(1) if match else "0.0.0"
 
-def get_last_tag(repo_path: Path) -> str:
+def get_pypi_latest_version(repo_path: Path) -> Optional[str]:
+    """Get the latest version published on PyPI."""
+    try:
+        from . import pypi
+        package_name = pypi.read_package_name(repo_path)
+        
+        if not package_name:
+            return None
+        
+        import requests
+        resp = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            # Get the latest version from PyPI
+            latest = data.get('info', {}).get('version')
+            return f"v{latest}" if latest else None
+    except:
+        pass
+    
+    return None
+
+def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "HEAD") -> bool:
+    """
+    Show interactive review of changes before generating changelog.
+    Returns True if user wants to continue, False to cancel.
+    """
+    try:
+        from gitship import review
+        
+        print(f"\n{Colors.CYAN}{Colors.BOLD}📊 COMMIT REVIEW{Colors.RESET}")
+        print("=" * 80)
+        print(f"{Colors.DIM}Reviewing changes to help write better release notes{Colors.RESET}")
+        print()
+        print(f"From: {Colors.YELLOW}{from_ref}{Colors.RESET}")
+        print(f"To:   {Colors.GREEN}{to_ref}{Colors.RESET}")
+        print()
+        
+        # Call review.main_with_args in non-interactive mode for display
+        review.main_with_args(
+            repo_path=repo_path,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            export=False,
+            show_messages=True,
+            show_stats=False,  # Don't show individual commit stats, just overview
+            output_dir=None
+        )
+        
+        print()
+        print("=" * 80)
+        print(f"{Colors.BOLD}Ready to write release notes?{Colors.RESET}")
+        print("  y - Continue to release notes editor")
+        print("  n - Cancel release")
+        print()
+        
+        try:
+            choice = input("Continue? (y/n): ").strip().lower()
+            return choice in ('y', 'yes', '')
+        except (KeyboardInterrupt, EOFError):
+            return False
+            
+    except ImportError:
+        print(f"{Colors.YELLOW}⚠️  Review module not available, skipping review{Colors.RESET}")
+        return True
+    except Exception as e:
+        print(f"{Colors.YELLOW}⚠️  Error showing review: {e}{Colors.RESET}")
+        return True
+
+
+def get_last_tag(repo_path: Path, prefer_pypi: bool = True) -> str:
+    """
+    Get the last release tag. 
+    
+    Args:
+        prefer_pypi: If True, use PyPI version if available (avoids "no changes" 
+                    when git tag exists but hasn't been reviewed yet)
+    """
+    if prefer_pypi:
+        # Try PyPI first - this is what's actually published
+        pypi_version = get_pypi_latest_version(repo_path)
+        if pypi_version:
+            print(f"{Colors.DIM}[Using PyPI latest: {pypi_version}]{Colors.RESET}")
+            return pypi_version
+    
+    # Fallback to git tags
     try:
         return run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path, check=False)
     except SystemExit:
@@ -1353,6 +1440,12 @@ def _main_logic(repo_path: Path):
             # 3. Use LAST tag as the base
             prev_tag = last_tag_full
             
+            print("\n📊 Reviewing changes before generating changelog...")
+            # Show review to help write better release notes
+            if not show_review_before_changelog(repo_path, prev_tag, "HEAD"):
+                print("Release cancelled.")
+                return
+            
             print("\nRegenerating changelog from git history...")
             # CORRECTLY UNPACK THE TUPLE
             draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
@@ -1543,15 +1636,19 @@ def _main_logic(repo_path: Path):
                         # Get previous tag
                         prev_tag = get_last_tag(repo_path)
                         
-                        print("\n🔄 Regenerating changelog from git history...")
-                        draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
-                        
-                        from . import pypi
-                        pkg_name = pypi.read_package_name(repo_path) or repo_path.name
-                        # Only suggest Initial Release if there are no previous tags
-                        smart_suffix = "Initial Release" if not prev_tag else suggested_title
-                        
-                        changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
+                        print("\n📊 Reviewing changes before regenerating changelog...")
+                        if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
+                            print("Skipping changelog regeneration.")
+                        else:
+                            print("\n🔄 Regenerating changelog from git history...")
+                            draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
+                            
+                            from . import pypi
+                            pkg_name = pypi.read_package_name(repo_path) or repo_path.name
+                            # Only suggest Initial Release if there are no previous tags
+                            smart_suffix = "Initial Release" if not prev_tag else suggested_title
+                            
+                            changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
                         write_changelog(repo_path, changelog_notes, current_ver)
                         notes_for_changelog = final_notes  # Update for later use
                     
@@ -1777,6 +1874,11 @@ def _main_logic(repo_path: Path):
                 # This ensures the changelog covers the correct range (PrevTag..HEAD)
                 prev_tag = get_last_tag(repo_path)
                 
+                print("\n📊 Reviewing changes before regenerating changelog...")
+                if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
+                    print("Release cancelled.")
+                    return
+                
                 print("\nRegenerating changelog from git history...")
                 draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
                 
@@ -1821,6 +1923,14 @@ def _main_logic(repo_path: Path):
     content = toml.read_text()
     toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{new_ver}"', content, count=1, flags=re.MULTILINE))
     print("✓ Updated pyproject.toml")
+    
+    # Show review before changelog
+    print("\n📊 Reviewing changes before generating changelog...")
+    if not show_review_before_changelog(repo_path, last_tag_full or "HEAD~10", "HEAD"):
+        print("Release cancelled. Reverting pyproject.toml...")
+        content = toml.read_text()
+        toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{current_ver}"', content, count=1, flags=re.MULTILINE))
+        return
     
     # Changelog
     draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
