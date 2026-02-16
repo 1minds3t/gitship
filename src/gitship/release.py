@@ -15,7 +15,6 @@ from datetime import datetime
 from collections import Counter
 from typing import Optional
 
-
 # Try to import changelog_generator for better changelog generation
 try:
     from gitship.changelog_generator import (
@@ -102,15 +101,15 @@ def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "
         print(f"To:   {Colors.GREEN}{to_ref}{Colors.RESET}")
         print()
         
-        # Call review.main_with_args in non-interactive mode for display
+        # Call review.main_with_args - it will display the review
+        # Parameters: repo_path, from_ref, to_ref, export, export_path, stat_only
         review.main_with_args(
             repo_path=repo_path,
             from_ref=from_ref,
             to_ref=to_ref,
             export=False,
-            show_messages=True,
-            show_stats=False,  # Don't show individual commit stats, just overview
-            output_dir=None
+            export_path=None,
+            stat_only=False
         )
         
         print()
