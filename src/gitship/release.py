@@ -289,8 +289,8 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
 
 def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "") -> tuple[str, str]:
     """
-    Enhanced interactive release notes editor with 3-step workflow.
-    Returns (final_notes, release_title_suffix)
+    Enhanced interactive release notes editor with proper markdown support.
+    Returns (final_notes_for_changelog, final_notes_for_github, release_title_suffix)
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     
@@ -325,33 +325,33 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
     print(f"  → Title: {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET} - {Colors.GREEN}{final_suffix}{Colors.RESET}")
     print()
     
-    # Step 2: Choose what to do with release notes
-    print(f"{Colors.BOLD}Step 2: Release Notes{Colors.RESET}")
+    # Step 2: Show auto-generated preview first
+    print(f"{Colors.BOLD}Step 2: Review Auto-Generated Content{Colors.RESET}")
+    print("=" * 80)
+    print(f"{Colors.DIM}This will be appended after any custom notes you write:{Colors.RESET}")
+    print()
+    print(draft)
+    print("=" * 80)
+    print()
+    
+    # Step 3: Choose what to do with release notes
+    print(f"{Colors.BOLD}Step 3: Add Custom Notes (Optional){Colors.RESET}")
     print("Options:")
     print("  1. Open editor to write custom notes (auto-generated appended below)")
     print("  2. Use auto-generated notes only")
-    print("  3. View auto-generated notes first")
-    print("  4. Cancel")
+    print("  3. Cancel")
     print()
     
     detailed_notes = ""
     
     while True:
         try:
-            notes_choice = input("Choose (1-4): ").strip()
+            notes_choice = input("Choose (1-3): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n\nRelease cancelled.")
             sys.exit(1)
         
         if notes_choice == '3':
-            print(f"\n{Colors.BOLD}Auto-generated changelog:{Colors.RESET}")
-            print("=" * 80)
-            print(draft)
-            print("=" * 80)
-            print()
-            continue
-        
-        elif notes_choice == '4':
             print("Release cancelled.")
             sys.exit(1)
         
@@ -363,20 +363,27 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
         elif notes_choice == '1':
             # Open editor for custom notes
             template = f"""# Write your custom release notes here
-# Lines starting with # will be ignored
+# 
+# IMPORTANT: Only lines starting with "# " (hash + space) are comments.
+# Markdown headers like ## Heading are preserved!
 #
-# The auto-generated breakdown will be appended below your notes
+# The auto-generated breakdown shown above will be appended below your notes.
 #
 # Example structure:
-# - High-level summary of what this release enables
-# - Key user-facing changes
-# - Breaking changes (if any)
-# - Migration notes (if needed)
-#
+## 🚀 Major Feature Release: The "Atomic Workflow" Engine
+This release transforms Gitship from a collection of scripts into a robust Git orchestration platform.
+
+### 🌟 Key Highlights
+- **Atomic GitOps Engine:** All operations now use a safety layer...
+- **Interactive Merge Suite:** A new guided conflict resolution workflow...
+
+### 🛠 New Commands
+- `gitship merge` / `resolve`: Interactive merge and conflict resolution
+- `gitship sync`: Unified sync workflow
 
 
 # ------------------------------------------------------------------
-# CLEANUP MARKER - Everything below will be removed
+# Everything below this line will be removed - delete this comment block when done
 # ------------------------------------------------------------------
 """
             
@@ -390,16 +397,18 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
                 with open(tf_path) as f:
                     content = f.read()
                 
-                # Remove comment lines and cleanup marker
+                # Remove ONLY comment lines (lines starting with "# " - hash + space)
+                # This preserves markdown headers like ## Heading
                 lines = []
                 for line in content.splitlines():
-                    stripped = line.strip()
-                    # Stop at cleanup marker
-                    if 'CLEANUP MARKER' in stripped:
+                    stripped = line.lstrip()
+                    # Remove only if it starts with "# " (comment), not "##" or "###" (markdown header)
+                    if stripped.startswith("# ") and not stripped.startswith("## "):
+                        continue
+                    # Stop at separator
+                    if "----------------------------" in line or "============================" in line:
                         break
-                    # Skip comment lines
-                    if not stripped.startswith('#'):
-                        lines.append(line.rstrip())
+                    lines.append(line.rstrip())
                 
                 # Remove leading/trailing empty lines
                 while lines and not lines[0]:
@@ -430,37 +439,54 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
     
     print()
     
-    # Build final changelog content
-    final_parts = []
+    # Build final notes - TWO VERSIONS
+    # Version 1: For CHANGELOG.md (includes header + title line)
+    changelog_parts = []
+    changelog_parts.append(f"## [{new_ver}] — {date_str}")
+    changelog_parts.append("")
+    changelog_parts.append(final_suffix)
+    changelog_parts.append("")
     
-    # Add header
-    final_parts.append(f"## [{new_ver}] — {date_str}")
-    final_parts.append("")
-    final_parts.append(final_suffix)
-    final_parts.append("")
-    
-    # Add custom notes if provided
     if detailed_notes:
-        final_parts.append(detailed_notes)
-        final_parts.append("")
-        final_parts.append("---")
-        final_parts.append("")
+        changelog_parts.append(detailed_notes)
+        changelog_parts.append("")
+        changelog_parts.append("---")
+        changelog_parts.append("")
     
-    # Add auto-generated breakdown
     if draft:
-        final_parts.append(draft)
+        changelog_parts.append(draft)
     
-    final_notes = '\n'.join(final_parts)
+    changelog_final = '\n'.join(changelog_parts)
     
-    # Preview
+    # Version 2: For GitHub Release (NO header, NO title line - those are separate fields)
+    github_parts = []
+    
+    if detailed_notes:
+        github_parts.append(detailed_notes)
+        github_parts.append("")
+        github_parts.append("---")
+        github_parts.append("")
+    
+    if draft:
+        github_parts.append(draft)
+    
+    github_final = '\n'.join(github_parts).strip()
+    
+    # Preview both
     print("=" * 80)
-    print(f"{Colors.BOLD}CHANGELOG PREVIEW{Colors.RESET}")
+    print(f"{Colors.BOLD}CHANGELOG.md PREVIEW{Colors.RESET}")
     print("=" * 80)
-    print(f"{Colors.CYAN}{final_notes}{Colors.RESET}")
+    print(f"{Colors.CYAN}{changelog_final}{Colors.RESET}")
+    print()
+    print("=" * 80)
+    print(f"{Colors.BOLD}GITHUB RELEASE BODY PREVIEW{Colors.RESET}")
+    print(f"{Colors.DIM}(Title and version header are separate fields){Colors.RESET}")
+    print("=" * 80)
+    print(f"{Colors.CYAN}{github_final}{Colors.RESET}")
     print("=" * 80)
     print()
     
-    return final_notes, final_suffix
+    return changelog_final, github_final, final_suffix
 
 def write_changelog(repo_path: Path, notes: str, version: str):
     """
@@ -671,7 +697,7 @@ def reset_version_to_tag(repo_path: Path):
         run_git(["push"], cwd=repo_path)
         print("✓ Pushed")
 
-def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
+def perform_git_release(repo_path: Path, version: str, release_title: str = "", github_notes: str = ""):
     tag = f"v{version}"
     
     # Check remote first
@@ -836,20 +862,25 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = ""):
     # PyPI Publishing
     username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
     
-    # Extract changelog using the proper extraction function
-    # NOTE: extract_changelog_section expects version without 'v' prefix
-    version_no_v = tag.lstrip('v')
-    changelog_content = extract_changelog_section(repo_path, version_no_v)
-    if not changelog_content:
-        # Fallback: try to read the first section manually
-        cl_path = repo_path / "CHANGELOG.md"
-        if cl_path.exists():
-            content = cl_path.read_text()
-            parts = content.split("## [")
-            if len(parts) > 1:
-                changelog_content = ("## [" + parts[1]).split("## [")[0].strip()
+    # Use the provided github_notes if available, otherwise extract from changelog
+    if github_notes:
+        changelog_content = github_notes
+        print(f"[DEBUG] Using provided GitHub notes: {len(changelog_content)} chars")
+    else:
+        # Fallback: Extract changelog using the proper extraction function
+        # NOTE: extract_changelog_section expects version without 'v' prefix
+        version_no_v = tag.lstrip('v')
+        changelog_content = extract_changelog_section(repo_path, version_no_v)
+        if not changelog_content:
+            # Fallback: try to read the first section manually
+            cl_path = repo_path / "CHANGELOG.md"
+            if cl_path.exists():
+                content = cl_path.read_text()
+                parts = content.split("## [")
+                if len(parts) > 1:
+                    changelog_content = ("## [" + parts[1]).split("## [")[0].strip()
+        print(f"[DEBUG] Extracted from changelog: {len(changelog_content)} chars")
     
-    print(f"[DEBUG] changelog length: {len(changelog_content)}")
     print(f"[DEBUG] changelog preview: {changelog_content[:200] if changelog_content else 'EMPTY'}")
     
     # Try to determine release title if not provided
@@ -1329,10 +1360,10 @@ def _main_logic(repo_path: Path):
             # 4. USE THE EDITOR, DON'T SKIP IT
             from . import pypi
             pkg_name = pypi.read_package_name(repo_path)
-            final_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=pkg_name)
+            changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=pkg_name)
             
-            write_changelog(repo_path, final_notes, current_ver)
-            perform_git_release(repo_path, current_ver, release_title)
+            write_changelog(repo_path, changelog_notes, current_ver)
+            perform_git_release(repo_path, current_ver, release_title, github_notes)
             return
             
         elif choice == '3':
@@ -1520,8 +1551,8 @@ def _main_logic(repo_path: Path):
                         # Only suggest Initial Release if there are no previous tags
                         smart_suffix = "Initial Release" if not prev_tag else suggested_title
                         
-                        final_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
-                        write_changelog(repo_path, final_notes, current_ver)
+                        changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, smart_suffix, pkg_name=pkg_name)
+                        write_changelog(repo_path, changelog_notes, current_ver)
                         notes_for_changelog = final_notes  # Update for later use
                     
                     # Commit changelog if changed
@@ -1554,12 +1585,12 @@ def _main_logic(repo_path: Path):
                         print("   ! No changelog found. Opening editor...")
                         # FIX: Provide default title and unpack tuple
                         default_suffix = "Release"
-                        notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
+                        changelog_notes, github_notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                         
                         # NOW update changelog with the notes user just wrote
                         if notes:
                             print("\n📝 Updating CHANGELOG.md with release notes...")
-                            write_changelog(repo_path, notes, current_ver)
+                            write_changelog(repo_path, changelog_notes, current_ver)
                             run_git(["add", "CHANGELOG.md"], cwd=repo_path)
                             run_git(["commit", "--amend", "--no-edit"], cwd=repo_path)  # Amend previous commit
                             run_git(["push", "--force-with-lease"], cwd=repo_path)  # Force push (safe)
@@ -1665,7 +1696,7 @@ def _main_logic(repo_path: Path):
                     # FIX: Provide default title and unpack tuple
                     is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
                     default_suffix = "Initial Release" if is_first_release else "Release"
-                    notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
+                    changelog_notes, github_notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
                 else:
                     print(f"   ✓ Found {len(notes.splitlines())} lines of notes")
                     # Extract title from first line of notes
@@ -1750,10 +1781,10 @@ def _main_logic(repo_path: Path):
                 draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
                 
                 # 4. Let user review/edit notes (Standard flow)
-                final_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=repo_path.name)
+                changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=repo_path.name)
                 
-                write_changelog(repo_path, final_notes, current_ver)
-                perform_git_release(repo_path, current_ver)
+                write_changelog(repo_path, changelog_notes, current_ver)
+                perform_git_release(repo_path, current_ver, release_title, github_notes)
                 return
                 
             elif choice == '3':
@@ -1816,11 +1847,11 @@ def _main_logic(repo_path: Path):
             is_first_release = False
     
     smart_suffix = "Initial Release" if is_first_release else suggested_title
-    final_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
-    write_changelog(repo_path, final_notes, new_ver)
+    changelog_notes, github_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
+    write_changelog(repo_path, changelog_notes, new_ver)
     
     # Finish
-    perform_git_release(repo_path, new_ver, release_title)
+    perform_git_release(repo_path, new_ver, release_title, github_notes)
 
 if __name__ == "__main__":
     main_with_repo(Path.cwd())
