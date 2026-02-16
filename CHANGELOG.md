@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-02-15
+
+The "Atomic Workflow" Update - Interactive Ops, Licensing & Docs
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/cli.py (284 lines changed)
+- UPDATE: src/gitship/commit.py (647 lines changed)
+- NEW: src/gitship/gitignore.py (259 lines changed)
+- NEW: src/gitship/licenses.py (1200 lines changed)
+- UPDATE: src/gitship/release.py (216 lines changed)
+
+**📚 Documentation:**
+- README.md (210 lines)
+- THIRD_PARTY_NOTICES.txt (35 lines)
+- requirements.txt (20 lines)
+- src/gitship/docs.py (702 lines)
+
+**⚙️ Configuration:**
+- pyproject.toml (4 lines)
+
+**Additional Changes:**
+- feat: enhance release workflow with interactive notes builder
+- feat: add license manager, interactive docs editor, and enhanced commit workflow
+
+_24 files changed, 8073 insertions(+), 555 deletions(-)_
+
 ## [0.2.5] — 2026-02-14
 
 Fix README.md, cli, and docs
