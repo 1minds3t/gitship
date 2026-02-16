@@ -46,11 +46,13 @@ def show_menu(repo_path: Path):
     print("  14. push    - Push changes to remote")
     print("  15. sync    - Pull and push in one operation")
     print("  16. amend   - Amend last commit with smart message")
+    print("  17. ignore  - Manage .gitignore entries")
+    print("  18. licenses - Fetch license files for dependencies")
     print("  0. exit     - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-16): ").strip()
+        choice = input("Enter your choice (0-18): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -124,12 +126,15 @@ def show_menu(repo_path: Path):
     elif choice == "10":
         from gitship import docs
         print("\nDocs Options:")
-        print("  1. Generate default README")
-        print("  2. Update from file")
-        sub = input("Choice (1-2): ").strip()
+        print("  1. Interactive editor (edit sections)")
+        print("  2. Generate default README")
+        print("  3. Update from file")
+        sub = input("Choice (1-3): ").strip()
         if sub == "1":
-            docs.main_with_args(repo_path, generate=True)
+            docs.main_with_args(repo_path, edit=True)
         elif sub == "2":
+            docs.main_with_args(repo_path, generate=True)
+        elif sub == "3":
             src = input("Source file path: ").strip()
             if src:
                 docs.main_with_args(repo_path, source=src)
@@ -147,6 +152,12 @@ def show_menu(repo_path: Path):
         sync.main_with_repo(repo_path, "sync")
     elif choice == "16":
         amend.main_with_repo(repo_path)
+    elif choice == "17":
+        from gitship import gitignore
+        gitignore.interactive_gitignore(repo_path)
+    elif choice == "18":
+        from gitship import licenses
+        licenses.interactive_licenses(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -392,6 +403,11 @@ Commands:
         help='Manage documentation/README'
     )
     docs_parser.add_argument(
+        '--edit',
+        action='store_true',
+        help='Interactive section-by-section README editor'
+    )
+    docs_parser.add_argument(
         '--generate',
         action='store_true',
         help='Generate default README with current features'
@@ -481,6 +497,53 @@ Commands:
         action='store_true',
         help='Automatically use smart message without prompting'
     )
+    
+    # ignore subcommand
+    ignore_parser = subparsers.add_parser(
+        'ignore',
+        help='Manage .gitignore entries'
+    )
+    ignore_parser.add_argument(
+        '--add',
+        type=str,
+        metavar='PATTERN',
+        help='Add pattern to .gitignore'
+    )
+    ignore_parser.add_argument(
+        '--remove',
+        type=str,
+        metavar='PATTERN',
+        help='Remove pattern from .gitignore'
+    )
+    ignore_parser.add_argument(
+        '--list',
+        action='store_true',
+        dest='list_ignore',
+        help='List current .gitignore entries'
+    )
+    ignore_parser.add_argument(
+        '--common',
+        type=str,
+        choices=['python', 'node'],
+        help='Add common patterns for language (python/node)'
+    )
+    
+    # licenses subcommand
+    licenses_parser = subparsers.add_parser(
+        'licenses',
+        help='Fetch license files for project dependencies'
+    )
+    licenses_parser.add_argument(
+        '--fetch',
+        action='store_true',
+        help='Fetch licenses for all dependencies in pyproject.toml'
+    )
+    licenses_parser.add_argument(
+        '--list',
+        action='store_true',
+        dest='list_licenses',
+        help='List current license files'
+    )
 
     args = parser.parse_args()
     
@@ -560,7 +623,7 @@ Commands:
             deps.main_with_repo(repo_path)
     elif args.command == 'docs':
         from gitship import docs
-        docs.main_with_args(repo_path, source=args.source, generate=args.generate)
+        docs.main_with_args(repo_path, source=args.source, generate=args.generate, edit=args.edit)
     
     elif args.command == 'resolve':
         from gitship import resolve_conflicts
@@ -581,6 +644,24 @@ Commands:
     
     elif args.command == 'amend':
         amend.main_with_repo(repo_path)
+    
+    elif args.command == 'ignore':
+        from gitship import gitignore
+        gitignore.main_with_args(
+            repo_path, 
+            add=args.add, 
+            remove=args.remove,
+            list_entries=args.list_ignore,
+            common=args.common
+        )
+    
+    elif args.command == 'licenses':
+        from gitship import licenses
+        licenses.main_with_args(
+            repo_path,
+            fetch=args.fetch,
+            list_files=args.list_licenses
+        )
         
     else:
         # No command specified, show menu

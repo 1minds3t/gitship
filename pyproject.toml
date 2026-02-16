@@ -53,6 +53,7 @@ Issues = "https://github.com/1minds3t/gitship/issues"
 gitship = "gitship.cli:main"
 
 [tool.setuptools]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.txt"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]

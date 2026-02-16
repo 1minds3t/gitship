@@ -1618,62 +1618,210 @@ def interactive_commit(analyzer: ChangeAnalyzer):
     
     # Show suggested message
     suggested = builder.suggest_commit_message()
-    print(f"\n{Colors.BOLD}Suggested commit message:{Colors.RESET}")
-    print(f"  {suggested}")
+    
+    # Enhanced interactive workflow
+    print(f"\n{Colors.CYAN}{Colors.BOLD}📝 COMMIT MESSAGE BUILDER{Colors.RESET}")
+    print("=" * 80)
     print()
     
-    # Ask user preference
-    print("Options:")
-    print("  1. Use suggested message")
-    print("  2. Write custom message")
-    print("  3. View combined diff stats (--stat)")
-    print("  4. View combined full diff (--patch)")
-    print("  5. Cancel")
+    # Option 1: Choose commit type (optional)
+    print(f"{Colors.BOLD}Step 1: Commit Type (optional){Colors.RESET}")
+    print("Select a commit type prefix, or press Enter to skip:")
+    print("  1. feat     - New feature")
+    print("  2. fix      - Bug fix")
+    print("  3. docs     - Documentation changes")
+    print("  4. style    - Code style/formatting (no logic change)")
+    print("  5. refactor - Code restructuring (no feature/bug change)")
+    print("  6. test     - Add or modify tests")
+    print("  7. chore    - Maintenance tasks")
+    print("  8. perf     - Performance improvements")
+    print("  9. ci       - CI/CD changes")
+    print("  0. (skip)   - No prefix")
     print()
     
+    commit_type = ""
     try:
-        choice = input("Choose option (1-5): ").strip()
-    except KeyboardInterrupt:
+        type_choice = input("Choose type (0-9, or Enter to skip): ").strip()
+        type_map = {
+            '1': 'feat', '2': 'fix', '3': 'docs', '4': 'style',
+            '5': 'refactor', '6': 'test', '7': 'chore', '8': 'perf', '9': 'ci'
+        }
+        if type_choice in type_map:
+            commit_type = type_map[type_choice]
+            print(f"  → Selected: {Colors.GREEN}{commit_type}{Colors.RESET}")
+    except (KeyboardInterrupt, EOFError):
         print("\n\nCommit cancelled.")
         return False
     
-    if choice == '3':
-        show_combined_stat(analyzer)
-        print()
-        return interactive_commit(analyzer)
+    print()
     
-    elif choice == '4':
-        show_combined_diff(analyzer)
-        print()
-        return interactive_commit(analyzer)
+    # Option 2: Write custom title (optional)
+    print(f"{Colors.BOLD}Step 2: Commit Title (optional){Colors.RESET}")
+    print(f"Write a short title, or press Enter to use the suggested one:")
+    print(f"{Colors.DIM}Suggested: {suggested.split(chr(10))[0]}{Colors.RESET}")
+    print()
     
-    elif choice == '5':
-        print("Commit cancelled.")
+    custom_title = ""
+    try:
+        custom_title = input("Title: ").strip()
+        if custom_title:
+            print(f"  → Custom title: {Colors.GREEN}{custom_title}{Colors.RESET}")
+    except (KeyboardInterrupt, EOFError):
+        print("\n\nCommit cancelled.")
         return False
     
-    elif choice == '2':
-        print("\nEnter your commit message (press Ctrl+D when done):")
-        message_lines = []
-        try:
-            while True:
-                line = input()
-                message_lines.append(line)
-        except (EOFError, KeyboardInterrupt):
-            pass
-        
-        message = '\n'.join(message_lines).strip()
-        if not message:
-            print("\nEmpty message. Commit cancelled.")
-            return False
+    print()
     
-    else:  # Default to suggested
-        message = suggested
+    # Option 3: Open editor for detailed message (optional)
+    print(f"{Colors.BOLD}Step 3: Detailed Message (optional){Colors.RESET}")
+    print("Options:")
+    print("  1. Open editor (nano/vim) to write detailed message")
+    print("  2. Skip - use auto-generated breakdown only")
+    print("  3. View suggested message first")
+    print("  4. View diff stats")
+    print("  5. View full diff")
+    print("  6. Cancel")
+    print()
+    
+    detailed_message = ""
+    editor_choice = ""
+    
+    while True:
+        try:
+            editor_choice = input("Choose (1-6): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nCommit cancelled.")
+            return False
+        
+        if editor_choice == '3':
+            print(f"\n{Colors.BOLD}Suggested commit message:{Colors.RESET}")
+            print(suggested)
+            print()
+            continue
+        
+        elif editor_choice == '4':
+            show_combined_stat(analyzer)
+            print()
+            continue
+        
+        elif editor_choice == '5':
+            show_combined_diff(analyzer)
+            print()
+            continue
+        
+        elif editor_choice == '6':
+            print("Commit cancelled.")
+            return False
+        
+        elif editor_choice == '2':
+            # Skip detailed message
+            break
+        
+        elif editor_choice == '1':
+            # Open editor
+            import tempfile
+            
+            # Create temp file with helpful template
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+                temp_path = tf.name
+                tf.write("# Write your detailed commit message here\n")
+                tf.write("# Lines starting with # will be ignored\n")
+                tf.write("#\n")
+                tf.write("# The auto-generated breakdown will be appended below\n")
+                tf.write("#\n\n")
+            
+            # Detect available editor
+            editor = os.environ.get('EDITOR', 'nano')
+            if editor == 'nano':
+                # Check if nano exists
+                result = subprocess.run(['which', 'nano'], capture_output=True)
+                if result.returncode != 0:
+                    editor = 'vim'
+            
+            try:
+                subprocess.run([editor, temp_path], check=True)
+                
+                # Read back the file
+                with open(temp_path, 'r') as f:
+                    lines = f.readlines()
+                
+                # Filter out comment lines and empty lines at start/end
+                message_lines = []
+                for line in lines:
+                    if not line.strip().startswith('#'):
+                        message_lines.append(line.rstrip())
+                
+                # Remove leading/trailing empty lines
+                while message_lines and not message_lines[0]:
+                    message_lines.pop(0)
+                while message_lines and not message_lines[-1]:
+                    message_lines.pop()
+                
+                detailed_message = '\n'.join(message_lines)
+                
+                if detailed_message:
+                    print(f"  → {Colors.GREEN}Custom message captured{Colors.RESET}")
+                else:
+                    print(f"  → {Colors.YELLOW}No message entered, will use auto-generated{Colors.RESET}")
+                
+            except Exception as e:
+                print(f"{Colors.RED}Error opening editor: {e}{Colors.RESET}")
+                print("Falling back to auto-generated message")
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+            
+            break
+        else:
+            print(f"{Colors.RED}Invalid choice{Colors.RESET}")
+            continue
+    
+    print()
+    
+    # Build final commit message
+    final_message_parts = []
+    
+    # Add type prefix and title
+    if commit_type and custom_title:
+        final_message_parts.append(f"{commit_type}: {custom_title}")
+    elif commit_type:
+        # Type but no custom title - use suggested title without the breakdown
+        suggested_title = suggested.split('\n')[0]
+        final_message_parts.append(f"{commit_type}: {suggested_title}")
+    elif custom_title:
+        final_message_parts.append(custom_title)
+    else:
+        # No type, no custom title - use suggested title
+        final_message_parts.append(suggested.split('\n')[0])
+    
+    # Add blank line if we have detailed message or breakdown coming
+    if detailed_message or True:  # Always add blank line for breakdown
+        final_message_parts.append("")
+    
+    # Add user's detailed message if provided
+    if detailed_message:
+        final_message_parts.append(detailed_message)
+        final_message_parts.append("")  # Blank line before breakdown
+    
+    # Add smart breakdown (everything except the first line of suggested)
+    suggested_lines = suggested.split('\n')
+    if len(suggested_lines) > 1:
+        # Skip the title line, add the rest
+        breakdown = '\n'.join(suggested_lines[1:]).strip()
+        if breakdown:
+            final_message_parts.append(breakdown)
+    
+    message = '\n'.join(final_message_parts).strip()
     
     # Confirm
-    print("\n" + "=" * 80)
-    print("COMMIT CONFIRMATION")
     print("=" * 80)
-    print(f"\nCommit message:\n{message}\n")
+    print(f"{Colors.BOLD}COMMIT CONFIRMATION{Colors.RESET}")
+    print("=" * 80)
+    print(f"\n{Colors.BOLD}Final commit message:{Colors.RESET}")
+    print(f"{Colors.CYAN}{message}{Colors.RESET}\n")
     
     # Count total files
     total_files = len(analyzer.changes['code']) + \

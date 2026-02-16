@@ -1,0 +1,35 @@
+gitship includes the following third-party software:
+================================================================================
+
+black
+License: Unknown
+See licenses/black.txt for full license text
+
+omnipkg (v2.2.3)
+License: Unknown
+See licenses/omnipkg.txt for full license text
+
+pyperclip
+License: Unknown
+See licenses/pyperclip.txt for full license text
+
+pytest-cov
+License: MIT
+See licenses/pytest-cov.txt for full license text
+
+pytest
+License: MIT
+See licenses/pytest.txt for full license text
+
+requests (v2.32.5)
+License: Apache-2.0
+See licenses/requests.txt for full license text
+
+ruff
+License: MIT
+See licenses/ruff.txt for full license text
+
+tomli (v2.4.0)
+License: MIT
+See licenses/tomli.txt for full license text
+

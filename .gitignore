@@ -149,3 +149,9 @@ Thumbs.db
 # Gitship specific
 *.log
 test_file.txt
+
+# Backup files
+*.bak
+
+# Auto-generated license files
+licenses/

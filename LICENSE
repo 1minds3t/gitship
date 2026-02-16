@@ -1,107 +1,21 @@
-gitcraft
-Craft your Git history with precision and ease.
-gitcraft is a collection of interactive Git tools that make working with your repository history intuitive and safe. Perfect for developers who want to inspect, understand, and selectively revert commits without the usual command-line complexity.
-Features
-🔍 checkgit - Interactive Commit Inspector
+MIT License
 
-View the last 10 commits in a beautifully formatted list
-See detailed file changes for any commit
-Interactive revert workflow with confirmation prompts
-Automatic logging of all operations
-Auto-detects current repository
+Copyright (c) 2026 1minds3t
 
-🔧 fixgit - Selective File Restorer
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Restore specific files to their state before a problematic commit
-Choose exactly which files to revert from a numbered list
-Select all files or pick individual ones
-Safe, atomic operations with automatic cleanup
-Integrates with your existing git workflow
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-Installation
-From PyPI (recommended)
-bashpip install gitcraft
-From source
-bashgit clone https://github.com/1minds3t/gitcraft.git
-cd gitcraft
-pip install -e .
-Usage
-checkgit
-Navigate to any git repository and run:
-bashcheckgit
-This will:
-
-Show you the last 10 commits with hashes, times, and messages
-Let you inspect detailed changes for any commit
-Optionally revert a commit through an interactive workflow
-
-Example:
-bashcd ~/my-project
-checkgit
-
-# Output:
-# === Last 10 commits in my-project (branch: main) ===
-# 1       a1b2c3d - 2 hours ago - Fix bug in parser (john)
-# 2       e4f5g6h - 5 hours ago - Add new feature (jane)
-# ...
-# 
-# Show detailed file changes for any commit? (y/n): y
-# Enter commit number (1-10): 1
-fixgit
-Restore specific files from before a problematic commit:
-bashfixgit [repo-path] [commit-sha]
-Example:
-bash# From within a repo
-fixgit . a1b2c3d
-
-# Or specify the repo path
-fixgit ~/my-project a1b2c3d
-
-# Interactive workflow:
-# Files changed in commit a1b2c3d:
-# 1. src/parser.py
-# 2. tests/test_parser.py
-# 3. README.md
-# 
-# Enter the number(s) of the file(s) to restore (e.g., '1' or '1 2 3', or 'all'): 1 2
-The tool will:
-
-Show all files changed in that commit
-Let you select which ones to restore
-Create a new commit with the restored files
-Push the changes automatically
-
-Why gitcraft?
-Problem: Git is powerful but intimidating. Reverting changes often requires memorizing complex commands, and it's easy to accidentally lose work or create a mess in your history.
-Solution: gitcraft provides a safe, interactive interface for the most common history-management tasks. No more googling "how to revert a file to previous commit" or worrying about destructive operations.
-Configuration
-Both tools automatically:
-
-Detect the current git repository
-Log operations to /var/log/ (or /tmp/ if no permissions)
-Handle SSH agent for authenticated pushes
-Stop/restart autopush services if configured
-
-Optional: Autopush Integration
-If you use an autopush systemd service (like autopush-stealth.service), fixgit will:
-
-Temporarily stop it during operations
-Automatically restart it when done
-
-Future Features
-Coming soon:
-
-AI-powered commit messages: Automatically generate detailed, structured commit messages using local or cloud LLM APIs
-Batch commit analysis: Process multiple commits at once with summary statistics
-Commit history visualization: Graph-based representation of your repository history
-Smart batching for auto-commits: Intelligent grouping of related changes
-MCP integration: Model Context Protocol support for LLM commit message generation
-
-Contributing
-Contributions welcome! Please feel free to submit a Pull Request.
-License
-MIT License - see LICENSE for details.
-Author
-Created by 1minds3t
-
-Note: gitcraft is designed for local development workflows. Always review changes before pushing to shared/production branches.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
