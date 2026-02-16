@@ -289,88 +289,178 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
 
 def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "") -> tuple[str, str]:
     """
-    Open editor with the changelog draft.
+    Enhanced interactive release notes editor with 3-step workflow.
     Returns (final_notes, release_title_suffix)
     """
     date_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Prompt for title with CLEAR prefix/suffix separation
-    print(f"\n{Colors.BOLD}Release Title:{Colors.RESET}")
-    print(f"{Colors.DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}")
+    print(f"\n{Colors.CYAN}{Colors.BOLD}📝 RELEASE NOTES BUILDER{Colors.RESET}")
+    print("=" * 80)
+    print()
     
-    # Build prefix (what's automatic)
+    # Build automatic prefix
     prefix = f"{pkg_name} v{new_ver}" if pkg_name else f"v{new_ver}"
     
-    # Show what's automatic vs what user adds
-    print(f"\n{Colors.CYAN}Auto prefix:{Colors.RESET} {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET}")
-    print(f"{Colors.CYAN}Your suffix:{Colors.RESET} {Colors.GREEN}{suggested_title}{Colors.RESET} {Colors.DIM}(suggested){Colors.RESET}")
-    print(f"\n{Colors.BOLD}Full title will be:{Colors.RESET}")
-    print(f"  {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET} - {Colors.GREEN}[YOUR SUFFIX HERE]{Colors.RESET}")
-    
-    print(f"\n{Colors.YELLOW}Type your suffix to append after '{prefix} -'{Colors.RESET}")
-    print(f"{Colors.DIM}Press Enter to use: {suggested_title}{Colors.RESET}")
-    
-    user_input = input(f"\n{Colors.BRIGHT_BLUE}Suffix:{Colors.RESET} ").strip()
-    
-    final_suffix = user_input if user_input else suggested_title
-    if not final_suffix:
-        final_suffix = "Release"
-        
-    # The changelog file itself usually just has the suffix as the top line description
-    # or we can put the full thing. Let's stick to the suffix for the markdown body.
-    template = f"""## [{new_ver}] — {date_str}
-
-{final_suffix}
-
-{draft}
-
-# ------------------------------------------------------------------
-# INSTRUCTIONS:
-# 1. The first line after the header is your Release Title.
-# 2. Review and edit the commit list below.
-# 3. Delete everything below the "CLEANUP MARKER" line.
-# 4. Save and exit.
-# ------------------------------------------------------------------
-# CLEANUP MARKER
-"""
-    
-    editor = os.environ.get('EDITOR', 'nano')
-    with tempfile.NamedTemporaryFile(suffix=".md", mode='w+', delete=False) as tf:
-        tf.write(template)
-        tf_path = tf.name
+    # Step 1: Choose release title suffix
+    print(f"{Colors.BOLD}Step 1: Release Title{Colors.RESET}")
+    print(f"{Colors.DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.RESET}")
+    print()
+    print(f"{Colors.CYAN}Auto prefix:{Colors.RESET} {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET}")
+    print(f"{Colors.CYAN}Suggested suffix:{Colors.RESET} {Colors.GREEN}{suggested_title}{Colors.RESET}")
+    print()
+    print(f"{Colors.BOLD}Full title will be:{Colors.RESET} {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET} - {Colors.GREEN}[YOUR SUFFIX]{Colors.RESET}")
+    print()
+    print(f"{Colors.YELLOW}Enter your suffix (or press Enter to use suggested):{Colors.RESET}")
     
     try:
-        subprocess.call([editor, tf_path])
-        with open(tf_path) as f:
-            content = f.read()
+        user_suffix = input(f"{Colors.BRIGHT_BLUE}Suffix:{Colors.RESET} ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\n\nRelease cancelled.")
+        sys.exit(1)
+    
+    final_suffix = user_suffix if user_suffix else suggested_title
+    if not final_suffix:
+        final_suffix = "Release"
+    
+    print(f"  → Title: {Colors.BRIGHT_CYAN}{prefix}{Colors.RESET} - {Colors.GREEN}{final_suffix}{Colors.RESET}")
+    print()
+    
+    # Step 2: Choose what to do with release notes
+    print(f"{Colors.BOLD}Step 2: Release Notes{Colors.RESET}")
+    print("Options:")
+    print("  1. Open editor to write custom notes (auto-generated appended below)")
+    print("  2. Use auto-generated notes only")
+    print("  3. View auto-generated notes first")
+    print("  4. Cancel")
+    print()
+    
+    detailed_notes = ""
+    
+    while True:
+        try:
+            notes_choice = input("Choose (1-4): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nRelease cancelled.")
+            sys.exit(1)
         
-        # Remove instruction lines
-        lines = [l for l in content.splitlines() if not l.strip().startswith("#")]
+        if notes_choice == '3':
+            print(f"\n{Colors.BOLD}Auto-generated changelog:{Colors.RESET}")
+            print("=" * 80)
+            print(draft)
+            print("=" * 80)
+            print()
+            continue
         
-        # Find and remove everything after cleanup marker
-        result_lines = []
-        for line in lines:
-            if "CLEANUP MARKER" in line:
-                break
-            result_lines.append(line)
+        elif notes_choice == '4':
+            print("Release cancelled.")
+            sys.exit(1)
         
-        full_notes = "\n".join(result_lines).strip() + "\n\n"
+        elif notes_choice == '2':
+            # Skip detailed notes, use auto-generated only
+            print(f"  → {Colors.GREEN}Using auto-generated notes{Colors.RESET}")
+            break
         
-        # Extract the title line (first non-empty line after header)
-        # This is a bit heuristic but works for the GH release title
-        # Build full title from prefix + suffix
-        prefix = f"{pkg_name} {new_ver}" if pkg_name else new_ver
-        release_title_clean = f"{prefix} - {final_suffix}"
-        for line in result_lines:
-            if line.strip() and not line.startswith("## ["):
-                release_title_clean = line.strip()
-                break
+        elif notes_choice == '1':
+            # Open editor for custom notes
+            template = f"""# Write your custom release notes here
+# Lines starting with # will be ignored
+#
+# The auto-generated breakdown will be appended below your notes
+#
+# Example structure:
+# - High-level summary of what this release enables
+# - Key user-facing changes
+# - Breaking changes (if any)
+# - Migration notes (if needed)
+#
+
+
+# ------------------------------------------------------------------
+# CLEANUP MARKER - Everything below will be removed
+# ------------------------------------------------------------------
+"""
+            
+            editor = os.environ.get('EDITOR', 'nano')
+            with tempfile.NamedTemporaryFile(suffix=".md", mode='w+', delete=False) as tf:
+                tf.write(template)
+                tf_path = tf.name
+            
+            try:
+                subprocess.call([editor, tf_path])
+                with open(tf_path) as f:
+                    content = f.read()
                 
-        return full_notes, release_title_clean
-        
-    finally:
-        if os.path.exists(tf_path): 
-            os.unlink(tf_path)
+                # Remove comment lines and cleanup marker
+                lines = []
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    # Stop at cleanup marker
+                    if 'CLEANUP MARKER' in stripped:
+                        break
+                    # Skip comment lines
+                    if not stripped.startswith('#'):
+                        lines.append(line.rstrip())
+                
+                # Remove leading/trailing empty lines
+                while lines and not lines[0]:
+                    lines.pop(0)
+                while lines and not lines[-1]:
+                    lines.pop()
+                
+                detailed_notes = '\n'.join(lines)
+                
+                if detailed_notes:
+                    print(f"  → {Colors.GREEN}Custom notes captured{Colors.RESET}")
+                else:
+                    print(f"  → {Colors.YELLOW}No custom notes, will use auto-generated{Colors.RESET}")
+                
+            except Exception as e:
+                print(f"{Colors.RED}Error opening editor: {e}{Colors.RESET}")
+                print("Falling back to auto-generated notes only")
+            finally:
+                try:
+                    os.unlink(tf_path)
+                except:
+                    pass
+            
+            break
+        else:
+            print(f"{Colors.RED}Invalid choice{Colors.RESET}")
+            continue
+    
+    print()
+    
+    # Build final changelog content
+    final_parts = []
+    
+    # Add header
+    final_parts.append(f"## [{new_ver}] — {date_str}")
+    final_parts.append("")
+    final_parts.append(final_suffix)
+    final_parts.append("")
+    
+    # Add custom notes if provided
+    if detailed_notes:
+        final_parts.append(detailed_notes)
+        final_parts.append("")
+        final_parts.append("---")
+        final_parts.append("")
+    
+    # Add auto-generated breakdown
+    if draft:
+        final_parts.append(draft)
+    
+    final_notes = '\n'.join(final_parts)
+    
+    # Preview
+    print("=" * 80)
+    print(f"{Colors.BOLD}CHANGELOG PREVIEW{Colors.RESET}")
+    print("=" * 80)
+    print(f"{Colors.CYAN}{final_notes}{Colors.RESET}")
+    print("=" * 80)
+    print()
+    
+    return final_notes, final_suffix
 
 def write_changelog(repo_path: Path, notes: str, version: str):
     """
