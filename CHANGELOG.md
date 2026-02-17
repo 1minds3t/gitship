@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-02-17
+
+Atomic Translation Snapshots & Conflict-Safe Commits
+
+This release makes gitship **ship itself** — the tool now has a new atomic commit flow for translations that:
+
+- **Freezes exactly what you reviewed** — captures a snapshot of .po/.mo diffs vs HEAD the moment you enter review mode
+- **Shows frozen preview** — large patches auto-preview first 50 lines per file (or full if small), with export to ~/gitship_exports/
+- **Safely commits the snapshot** — stashes AI's latest work, writes the reviewed snapshot, stages/commits, then pops stash to restore AI progress
+- **Auto-resolves binary conflicts** — .mo files never 3-way merge cleanly; now detects binaries via git diff --numstat and takes --theirs (AI's latest) automatically
+- **Adds description/body input** — inline typing or editor for meaningful commit context (bullets, closes issues, etc.)
+
+All this means gitship can now **commit its own translation changes** (or any ignored files) while an AI keeps modifying them in the background — without conflicts or losing live work.
+
+**Meta moment**: This very release was committed using the new flow — gitship shipped itself!
+
+Other tweaks:
+- commit.py: new commit_translations_only() + review loop with snapshot locking
+- gitops.py: capture_file_snapshot(), atomic_commit_with_snapshot(), stash pop binary resolver
+- licenses.py: better transitive dep resolution (requirements.txt first)
+- release.py: cleaned editor template
+
+Ready for real-world translation workflows — massive Arabic surge (95%+) was committed cleanly with this!
+
+#
+#
+#
+#
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/commit.py (398 lines changed)
+- UPDATE: src/gitship/gitops.py (275 lines changed)
+- UPDATE: src/gitship/licenses.py (55 lines changed)
+- UPDATE: src/gitship/release.py (33 lines changed)
+
+_4 files changed, 716 insertions(+), 45 deletions(-)_
+
 ## [0.3.0] — 2026-02-15
 
 The "Atomic Workflow" Update - Interactive Operations & AI-Ready Foundation
