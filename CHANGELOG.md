@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-02-17
+
+Fix comment stripping in release notes
+
+- **Comment stripping in release notes editor**
+  Previously, only lines starting with `# ` (hash + space) were stripped as comments, while lines starting with just `#` (like the example comments in the template) were not. This caused template examples to potentially appear in final release notes. Now any line starting with `#` is properly stripped, with markdown headings (`## ...`) preserved.
+
+- This is a one-character fix (`"# "` → `"#"`) that makes gitship's release note generator correctly strip its own example comments. Gitship, healing itself. ✨
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/release.py (2 lines changed)
+
+_1 file changed, 1 insertion(+), 1 deletion(-)_
+
 ## [0.3.1] — 2026-02-17
 
 Atomic Translation Snapshots & Conflict-Safe Commits
