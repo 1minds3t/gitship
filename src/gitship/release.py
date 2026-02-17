@@ -484,7 +484,7 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
                 for line in content.splitlines():
                     stripped = line.lstrip()
                     # Remove only if it starts with "# " (comment), not "##" or "###" (markdown header)
-                    if stripped.startswith("# ") and not stripped.startswith("## "):
+                    if stripped.startswith("#") and not stripped.startswith("## "):
                         continue
                     # Stop at separator
                     if "----------------------------" in line or "============================" in line:
