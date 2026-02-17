@@ -448,29 +448,24 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
         
         elif notes_choice == '1':
             # Open editor for custom notes
-            template = f"""# Write your custom release notes here
-# 
-# IMPORTANT: Only lines starting with "# " (hash + space) are comments.
-# Markdown headers like ## Heading are preserved!
+            template = f"""# Write your custom release notes here.
+# Lines starting with "# " are comments and will be stripped.
+# Markdown headers (## Heading) are preserved.
+# The auto-generated breakdown will be appended below your notes.
 #
-# The auto-generated breakdown shown above will be appended below your notes.
+# Example (all commented out — replace with your own content):
 #
-# Example structure:
-## 🚀 Major Feature Release: The "Atomic Workflow" Engine
-This release transforms Gitship from a collection of scripts into a robust Git orchestration platform.
-
-### 🌟 Key Highlights
-- **Atomic GitOps Engine:** All operations now use a safety layer...
-- **Interactive Merge Suite:** A new guided conflict resolution workflow...
-
-### 🛠 New Commands
-- `gitship merge` / `resolve`: Interactive merge and conflict resolution
-- `gitship sync`: Unified sync workflow
-
-
+# ## 🚀 Major Feature Release: The "Atomic Workflow" Engine
+# This release transforms the project into a robust platform.
+#
+# ### 🌟 Key Highlights
+# - **New Engine:** All operations now use a safety layer...
+# - **Interactive Suite:** A new guided conflict resolution workflow...
+#
 # ------------------------------------------------------------------
-# Everything below this line will be removed - delete this comment block when done
+# Start writing below this line (delete these comments when done)
 # ------------------------------------------------------------------
+
 """
             
             editor = os.environ.get('EDITOR', 'nano')

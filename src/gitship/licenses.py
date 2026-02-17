@@ -387,33 +387,38 @@ def fetch_all_licenses(repo_path: Path, interactive: bool = True, include_option
 
 
 def get_transitive_dependencies(repo_path: Path) -> Set[str]:
-    """Get transitive dependencies using pip-compile or pip show."""
+    """Get transitive dependencies from requirements files or recursive resolution."""
     import subprocess
     
-    # Try pip-compile first (from pip-tools)
-    try:
-        result = subprocess.run(
-            ["pip-compile", "--dry-run", "pyproject.toml"],
-            capture_output=True,
-            text=True,
-            cwd=repo_path,
-            timeout=30
-        )
-        
-        if result.returncode == 0:
-            # Parse output for package names
+    # Method 1: Check if requirements.txt or requirements-trace.txt exists
+    for req_file in ['requirements-trace.txt', 'requirements.txt']:
+        req_path = repo_path / req_file
+        if req_path.exists():
+            print(f"  📄 Reading from {req_file}...")
             deps = set()
-            for line in result.stdout.split('\n'):
-                if line and not line.startswith('#') and '==' in line:
-                    pkg = line.split('==')[0].strip()
-                    deps.add(pkg)
-            return deps
-    except FileNotFoundError:
-        pass  # pip-compile not installed
-    except Exception:
-        pass
+            try:
+                content = req_path.read_text()
+                for line in content.split('\n'):
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    # Parse package name (format: package==version or package>=version)
+                    if '==' in line or '>=' in line or '<=' in line or '>' in line or '<' in line:
+                        # Split on first occurrence of comparison operator
+                        pkg = line.split('==')[0].split('>=')[0].split('<=')[0].split('>')[0].split('<')[0].strip()
+                        # Remove any inline comments and conditions
+                        pkg = pkg.split('#')[0].split(';')[0].strip()
+                        if pkg:
+                            deps.add(pkg)
+                if deps:
+                    print(f"    Found {len(deps)} packages in {req_file}")
+                    return deps
+            except Exception as e:
+                print(f"    ⚠️  Error reading {req_file}: {e}")
     
-    # Fallback: use pip show to get dependencies recursively
+    # Method 2: Recursive pip show (walks dependency tree from pyproject.toml)
+    print("  🔄 Using recursive dependency resolution from pyproject.toml...")
     try:
         # Get direct dependencies first
         direct_deps = read_dependencies_from_toml(repo_path, include_optional=False)
@@ -447,9 +452,11 @@ def get_transitive_dependencies(repo_path: Path) -> Set[str]:
                                     all_deps.add(dep)
                                     to_check.append(dep)
         
+        print(f"    Found {len(all_deps)} total packages (including direct)")
         return all_deps - direct_deps  # Return only transitive ones
         
-    except Exception:
+    except Exception as e:
+        print(f"    ⚠️  Error in recursive resolution: {e}")
         return set()
 
 

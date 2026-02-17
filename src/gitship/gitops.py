@@ -254,6 +254,281 @@ def atomic_git_operation(
     return result
 
 
+def capture_file_snapshot(repo_path: Path, filepath: str) -> Optional[Dict[str, Any]]:
+    """
+    Capture the exact current diff of a file vs HEAD as a frozen snapshot.
+    
+    This records what changed RIGHT NOW, so even if the AI keeps modifying
+    the file while the user reviews, we can restore exactly this state at
+    commit time.
+    
+    Args:
+        repo_path: Path to git repository
+        filepath: Relative path to file within repo
+        
+    Returns:
+        Dict with 'filepath', 'patch' (unified diff text), 'head_content',
+        'snapshot_content', and 'lang_code' (extracted from locale path).
+        Returns None if file has no changes vs HEAD.
+    """
+    abs_path = repo_path / filepath
+    
+    # Get HEAD content
+    head_result = run_git(["show", f"HEAD:{filepath}"], cwd=repo_path, check=False)
+    head_content = head_result.stdout if head_result.returncode == 0 else ""
+    
+    # Get current working tree content
+    if not abs_path.exists():
+        return None
+    try:
+        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+            current_content = f.read()
+    except Exception:
+        return None
+    
+    if current_content == head_content:
+        return None  # No changes
+    
+    # Build unified diff as our frozen patch
+    import difflib
+    head_lines = head_content.splitlines(keepends=True)
+    current_lines = current_content.splitlines(keepends=True)
+    patch_lines = list(difflib.unified_diff(
+        head_lines, current_lines,
+        fromfile=f"a/{filepath}",
+        tofile=f"b/{filepath}",
+        lineterm=''
+    ))
+    patch_text = '\n'.join(patch_lines)
+    
+    # Extract language code from locale path, e.g.:
+    #   src/omnipkg/locale/ar_eg/LC_MESSAGES/omnipkg.po  ->  ar_eg
+    #   locale/fr/LC_MESSAGES/app.po                      ->  fr
+    lang_code = None
+    path_parts = Path(filepath).parts
+    for i, part in enumerate(path_parts):
+        if part == 'locale' and i + 1 < len(path_parts):
+            lang_code = path_parts[i + 1]
+            break
+    
+    return {
+        'filepath': filepath,
+        'patch': patch_text,
+        'head_content': head_content,
+        'snapshot_content': current_content,
+        'lang_code': lang_code,
+    }
+
+
+def capture_translation_snapshots(repo_path: Path, trans_file_list: List[Dict]) -> List[Dict[str, Any]]:
+    """
+    Capture frozen snapshots for all translation files right now.
+    
+    Call this when the user says "yes I want to include these translations".
+    Returns a list of snapshot dicts (from capture_file_snapshot) for files
+    that actually have changes.
+    """
+    snapshots = []
+    for file_info in trans_file_list:
+        filepath = file_info.get('path') or file_info.get('filepath')
+        if not filepath:
+            continue
+        snap = capture_file_snapshot(repo_path, filepath)
+        if snap:
+            snapshots.append(snap)
+    return snapshots
+
+
+def atomic_commit_with_snapshot(
+    repo_path: Path,
+    snapshots: List[Dict[str, Any]],
+    commit_message: str,
+    ignore_patterns: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> subprocess.CompletedProcess:
+    """
+    Atomically commit a frozen snapshot of translation files alongside other changes.
+    
+    The problem this solves: an AI process keeps writing to .po files continuously.
+    By the time the user finishes reviewing and writing a commit message, the files
+    have changed further. We want to commit exactly what the user reviewed, not the
+    latest AI output.
+    
+    Algorithm:
+      1. Stash EVERYTHING matching ignore_patterns (the latest AI output)
+      2. For each snapshot: write snapshot_content directly to the file
+         (this is exactly what was showing when user reviewed)  
+      3. git add those specific files
+      4. git commit (picks up the snapshot content + any other staged/unstaged changes)
+      5. git stash pop (restore the AI's latest work on top)
+    
+    Args:
+        repo_path: Path to git repository
+        snapshots: List of snapshot dicts from capture_file_snapshot()
+        commit_message: Full commit message string
+        ignore_patterns: Patterns to stash (uses project config if None)
+        verbose: Print debug info
+        
+    Returns:
+        CompletedProcess from the commit command
+    """
+    if ignore_patterns is None:
+        ignore_patterns = get_ignore_patterns(repo_path)
+    
+    if not snapshots:
+        # Nothing to snapshot-commit — fall through to plain atomic operation
+        return atomic_git_operation(
+            repo_path=repo_path,
+            git_command=["commit", "-a", "-m", commit_message],
+            description="commit",
+            ignore_patterns=ignore_patterns,
+            verbose=verbose,
+        )
+    
+    if verbose:
+        print(f"[DEBUG] atomic_commit_with_snapshot: {len(snapshots)} translation file(s)")
+        for s in snapshots:
+            print(f"[DEBUG]   {s['filepath']} (lang: {s.get('lang_code', '?')})")
+    
+    stash_ref = None
+    stash_message = "Auto-stash: pre-snapshot-commit"
+    
+    # ── Step 1: Stash current (AI-latest) versions of ignored files ──────────
+    needs_stash = has_ignored_changes(repo_path, ignore_patterns)
+    if verbose:
+        print(f"[DEBUG] needs_stash = {needs_stash}")
+    
+    if needs_stash:
+        print("\n🔒 Stashing AI-modified translations to restore reviewed state...")
+        stash_cmd = ["stash", "push", "-m", stash_message, "--"]
+        stash_cmd.extend(ignore_patterns)
+        stash_result = run_git(stash_cmd, cwd=repo_path, check=False)
+        
+        if stash_result.returncode == 0:
+            print("✓ Stashed")
+            list_result = run_git(
+                ["stash", "list", "--format=%gd:%gs"], cwd=repo_path, check=False
+            )
+            for line in list_result.stdout.splitlines():
+                if stash_message in line:
+                    stash_ref = line.split(':', 1)[0]
+                    break
+            if verbose:
+                print(f"[DEBUG] stash_ref = {stash_ref}")
+        else:
+            if verbose:
+                print(f"[DEBUG] Stash failed: {stash_result.stderr}")
+            print("⚠  Could not stash, proceeding anyway (snapshot will still be applied)")
+    
+    # ── Step 2: Write the frozen snapshot content to each file ───────────────
+    print("\n📌 Restoring reviewed snapshot state...")
+    restored_files = []
+    failed_files = []
+    
+    for snap in snapshots:
+        filepath = snap['filepath']
+        abs_path = repo_path / filepath
+        try:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(abs_path, 'w', encoding='utf-8') as f:
+                f.write(snap['snapshot_content'])
+            restored_files.append(filepath)
+            if verbose:
+                print(f"[DEBUG]   Wrote snapshot → {filepath}")
+        except Exception as e:
+            failed_files.append((filepath, str(e)))
+            print(f"  ✗ Failed to restore {filepath}: {e}")
+    
+    if failed_files and not restored_files:
+        # Everything failed — pop the stash and abort
+        if stash_ref:
+            run_git(["stash", "pop", stash_ref], cwd=repo_path, check=False)
+        result = subprocess.CompletedProcess(["git", "commit"], 1, "", "Failed to write any snapshot content")
+        return result
+    
+    for fp in restored_files:
+        print(f"  ✓ {fp}")
+    
+    # ── Step 3: Stage the snapshot files ─────────────────────────────────────
+    print("\n📎 Staging snapshot files...")
+    for filepath in restored_files:
+        stage_result = run_git(["add", filepath], cwd=repo_path, check=False)
+        if stage_result.returncode == 0:
+            if verbose:
+                print(f"[DEBUG]   Staged {filepath}")
+        else:
+            print(f"  ⚠  Could not stage {filepath}: {stage_result.stderr}")
+    
+    # ── Step 4: Commit ────────────────────────────────────────────────────────
+    print("\n💾 Committing...")
+    commit_result = run_git(["commit", "-m", commit_message], cwd=repo_path, check=False)
+    
+    if commit_result.returncode == 0:
+        print("✓ Committed")
+        if verbose:
+            print(commit_result.stdout)
+    else:
+        print(f"✗ Commit failed: {commit_result.stderr}")
+    
+    # ── Step 5: Pop the stash to restore AI's latest work ────────────────────
+    if stash_ref:
+        print("\n↩️  Restoring AI's latest translation work...")
+        pop_result = run_git(["stash", "pop", stash_ref], cwd=repo_path, check=False)
+        if pop_result.returncode == 0:
+            print("✓ Restored")
+        elif "conflict" in (pop_result.stderr + pop_result.stdout).lower():
+            # Binary files (e.g. .mo) can never be 3-way merged by git — they will
+            # always show as conflicted even though "theirs" (the stash = AI's latest)
+            # is exactly what we want.  Detect all UU files, resolve binaries with
+            # --theirs automatically, and leave text conflicts for the user.
+            print("  Conflicts detected — checking for binary files to auto-resolve...")
+            
+            status_result = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+            conflicted = []
+            for line in status_result.stdout.splitlines():
+                if line.startswith("UU ") or line.startswith("AA "):
+                    conflicted.append(line[3:].strip())
+            
+            binary_resolved = []
+            text_conflicted = []
+            for filepath in conflicted:
+                # Check if file is binary by asking git
+                check = run_git(
+                    ["diff", "--numstat", "HEAD", "--", filepath],
+                    cwd=repo_path, check=False
+                )
+                # git diff --numstat outputs "-\t-\tfilename" for binary files
+                if check.stdout.strip().startswith("-\t-\t"):
+                    # Binary — just take the stash (AI's latest) version
+                    run_git(["checkout", "--theirs", "--", filepath], cwd=repo_path, check=False)
+                    run_git(["add", "--", filepath], cwd=repo_path, check=False)
+                    binary_resolved.append(filepath)
+                else:
+                    text_conflicted.append(filepath)
+            
+            if binary_resolved:
+                print(f"✓ Auto-resolved {len(binary_resolved)} binary file(s) (took AI's latest version)")
+                if verbose:
+                    for f in binary_resolved:
+                        print(f"  [DEBUG] binary resolved: {f}")
+            
+            if text_conflicted:
+                print(f"⚠  {len(text_conflicted)} text file(s) still have conflicts — resolve manually:")
+                for f in text_conflicted:
+                    print(f"   git checkout --theirs -- {f} && git add {f}")
+                print(f"   Then: git stash drop {stash_ref}")
+            else:
+                # All conflicts resolved — drop the now-empty stash
+                run_git(["stash", "drop", stash_ref], cwd=repo_path, check=False)
+                print("✓ Stash cleaned up — working tree fully restored")
+        else:
+            if verbose:
+                print(f"[DEBUG] Pop stderr: {pop_result.stderr}")
+            print(f"⚠  Could not pop stash automatically. Run: git stash pop {stash_ref}")
+    
+    return commit_result
+
+
 def stash_ignored_changes(repo_path: Path, description: str, patterns: Optional[List[str]] = None) -> bool:
     """
     Manually stash ignorable changes.

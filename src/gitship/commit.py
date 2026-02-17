@@ -15,11 +15,18 @@ from collections import defaultdict
 import re
 
 try:
-    from gitship.gitops import atomic_git_operation, has_ignored_changes
+    from gitship.gitops import (
+        atomic_git_operation,
+        has_ignored_changes,
+        capture_translation_snapshots,
+        atomic_commit_with_snapshot,
+    )
 except ImportError:
     # Fallback if gitops not available yet
     atomic_git_operation = None
     has_ignored_changes = None
+    capture_translation_snapshots = None
+    atomic_commit_with_snapshot = None
 
 
 # ANSI color codes
@@ -1563,6 +1570,369 @@ def show_combined_diff(analyzer: ChangeAnalyzer):
     input("\nPress Enter to continue...")
 
 
+def _extract_lang_name(lang_code: str) -> str:
+    """Convert a locale code from the file path into a readable display name.
+
+    Examples: ar_eg -> ar_EG,  fr -> fr,  zh_hans -> zh_HANS
+    We just upper-case the country/script part so it reads naturally.
+    """
+    parts = lang_code.replace('-', '_').split('_', 1)
+    if len(parts) == 2:
+        return f"{parts[0]}_{parts[1].upper()}"
+    return lang_code
+
+
+def commit_translations_only(analyzer: ChangeAnalyzer):
+    """
+    Commit translation files using a frozen snapshot captured right now.
+
+    Because the AI keeps modifying .po files in the background, we:
+      1. Snapshot the exact diff vs HEAD the moment the user enters this flow
+      2. Let the user review THAT frozen snapshot (not the live file)
+      3. On confirm, call atomic_commit_with_snapshot which:
+           - stashes current (AI-latest) versions of ignored files
+           - writes back exactly the snapshot content
+           - stages + commits those files (+ anything else staged)
+           - pops the stash to restore the AI's latest work
+    """
+    trans_files = []
+    for lang_files in analyzer.changes['translations'].values():
+        trans_files.extend(lang_files)
+
+    if not trans_files:
+        print("\n❌ No translation changes detected.")
+        input("Press Enter to continue...")
+        return False
+
+    print(f"\n{'=' * 80}")
+    print("TRANSLATION SNAPSHOT — Lock Current State")
+    print("=" * 80)
+    print(f"\n⏳ Capturing snapshot of {len(trans_files)} file(s) right now...")
+    print("   (This freezes what changed so the AI can keep running safely)")
+
+    # ── Capture snapshot immediately ──────────────────────────────────────────
+    if capture_translation_snapshots:
+        snapshots = capture_translation_snapshots(analyzer.repo_path, trans_files)
+    else:
+        # Fallback when gitops not available: read content + git diff manually
+        snapshots = []
+        for f in trans_files:
+            filepath = f['path']
+            diff_result = analyzer.run_git(["diff", "HEAD", "--", filepath])
+            if diff_result.returncode == 0 and diff_result.stdout.strip():
+                abs_path = analyzer.repo_path / filepath
+                try:
+                    with open(abs_path, 'r', encoding='utf-8', errors='replace') as fh:
+                        current = fh.read()
+                except Exception:
+                    current = ""
+                m = re.search(r'/locale/([^/]+)/', filepath)
+                lang_code = m.group(1) if m else None
+                snapshots.append({
+                    'filepath': filepath,
+                    'patch': diff_result.stdout,
+                    'snapshot_content': current,
+                    'lang_code': lang_code,
+                })
+
+    if not snapshots:
+        print("\n⚠  No differences found vs HEAD — nothing to commit.")
+        input("Press Enter to continue...")
+        return False
+
+    # Summarise snapshotted languages (from file path, not .po header)
+    langs = sorted({s['lang_code'] for s in snapshots if s.get('lang_code')})
+    lang_display = ', '.join(_extract_lang_name(l) for l in langs) if langs else 'unknown'
+    print(f"\n✓ Snapshot captured: {len(snapshots)} file(s)  [{lang_display}]")
+
+    # ── Review loop ───────────────────────────────────────────────────────────
+    # Pre-compute patch stats for display
+    def _patch_stats(snap):
+        lines = snap['patch'].splitlines()
+        adds = sum(1 for l in lines if l.startswith('+') and not l.startswith('+++'))
+        dels = sum(1 for l in lines if l.startswith('-') and not l.startswith('---'))
+        hunks = sum(1 for l in lines if l.startswith('@@'))
+        return adds, dels, hunks
+
+    def _print_patch_coloured(patch_text, max_lines=None):
+        """Print a patch with colour. If max_lines set, stop and show truncation notice."""
+        shown = 0
+        lines = patch_text.splitlines()
+        for line in lines:
+            if max_lines and shown >= max_lines:
+                remaining = len(lines) - shown
+                print(f"{Colors.DIM}  ... {remaining} more lines — use 'Export' to see full patch{Colors.RESET}")
+                break
+            if line.startswith('+') and not line.startswith('+++'):
+                print(f"{Colors.GREEN}{line}{Colors.RESET}")
+            elif line.startswith('-') and not line.startswith('---'):
+                print(f"{Colors.RED}{line}{Colors.RESET}")
+            elif line.startswith('@@'):
+                print(f"{Colors.CYAN}{line}{Colors.RESET}")
+            else:
+                print(line)
+            shown += 1
+
+    def _export_snapshot_patch(snapshots, lang_display):
+        """Write frozen patch to a temp file and print the path."""
+        import tempfile, datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"translation_snapshot_{lang_display.replace(', ', '_')}_{ts}.patch"
+        export_dir = Path.home() / "gitship_exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        out_path = export_dir / fname
+        with open(out_path, 'w', encoding='utf-8') as fh:
+            fh.write(f"# FROZEN SNAPSHOT — captured {datetime.datetime.now()}\n")
+            fh.write(f"# Languages: {lang_display}\n\n")
+            for snap in snapshots:
+                lname = _extract_lang_name(snap['lang_code']) if snap.get('lang_code') else '?'
+                adds, dels, hunks = _patch_stats(snap)
+                fh.write(f"# {snap['filepath']}  [{lname}]  +{adds}/-{dels} in {hunks} hunk(s)\n")
+                fh.write(snap['patch'])
+                fh.write("\n\n")
+        return out_path
+
+    # Decide threshold for "large" patch: >200 patch lines triggers preview mode
+    total_patch_lines = sum(len(s['patch'].splitlines()) for s in snapshots)
+    is_large = total_patch_lines > 200
+
+    print()
+    print("Review the FROZEN snapshot (AI can keep writing — this won't change):")
+    print()
+    print("  1. Stats only   (counts per file)")
+    if is_large:
+        print(f"  2. Preview      (first 50 lines per file — {total_patch_lines} patch lines total)")
+    else:
+        print(f"  2. Full patch   ({total_patch_lines} patch lines)")
+    print("  3. Export patch  (write full frozen diff to ~/gitship_exports/)")
+    print("  4. Continue to commit message")
+    print("  5. Cancel — discard snapshot")
+    print()
+
+    while True:
+        try:
+            choice = input("Choose (1-5): ").strip()
+        except KeyboardInterrupt:
+            print("\n\nCancelled.")
+            return False
+
+        if choice == '1':
+            print()
+            for snap in snapshots:
+                lname = _extract_lang_name(snap['lang_code']) if snap.get('lang_code') else snap['filepath']
+                adds, dels, hunks = _patch_stats(snap)
+                print(f"  📄 {snap['filepath']}")
+                print(f"     [{lname}]  +{adds} / -{dels} lines  {hunks} hunk(s)  ← snapshot")
+            print()
+
+        elif choice == '2':
+            preview_limit = 50 if is_large else None
+            print()
+            for snap in snapshots:
+                lname = _extract_lang_name(snap['lang_code']) if snap.get('lang_code') else snap['filepath']
+                adds, dels, hunks = _patch_stats(snap)
+                print(f"\n{'─' * 70}")
+                label = "PREVIEW — first 50 lines" if is_large else "FROZEN SNAPSHOT"
+                print(f"  {snap['filepath']}  [{lname}]  +{adds}/-{dels}  ← {label}")
+                print(f"{'─' * 70}")
+                _print_patch_coloured(snap['patch'], max_lines=preview_limit)
+            print()
+
+        elif choice == '3':
+            out_path = _export_snapshot_patch(snapshots, lang_display)
+            print(f"\n  ✓ Patch exported to: {out_path}")
+            print(f"    Open with:  diff-highlight < {out_path} | less -R")
+            print()
+
+        elif choice == '4':
+            break
+
+        elif choice == '5':
+            print("Cancelled — snapshot discarded.")
+            return False
+
+        else:
+            print("Invalid choice.")
+
+    # ── Build commit message ──────────────────────────────────────────────────
+    print()
+    print(f"{Colors.BOLD}Commit Message{Colors.RESET}")
+    suggested_title = f"Update translations [{lang_display}]" if langs else "Update translations"
+    print(f"Suggested: {Colors.DIM}{suggested_title}{Colors.RESET}")
+    print("Enter a custom title, or press Enter to use the suggested one:")
+    print()
+
+    try:
+        custom_title = input("Title: ").strip()
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return False
+
+    title = custom_title if custom_title else suggested_title
+
+    print()
+    print("Commit type prefix (Enter to skip):")
+    print("  1. chore   2. feat   3. fix   4. i18n")
+    try:
+        type_choice = input("Choose: ").strip()
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return False
+
+    type_map = {'1': 'chore', '2': 'feat', '3': 'fix', '4': 'i18n'}
+    commit_type = type_map.get(type_choice, '')
+    first_line = f"{commit_type}: {title}" if commit_type else title
+
+    # ── Step: Description / body (optional) ──────────────────────────────────
+    print()
+    print(f"{Colors.BOLD}Description (optional){Colors.RESET}")
+    print("Add context, bullet points, references — anything you want in the commit body.")
+    print()
+    print("  1. Type inline  (paste or type, end with a blank line)")
+    print("  2. Open editor  (nano/vim — good for longer notes)")
+    print("  3. Skip         (auto-generated file list only)")
+    print()
+
+    user_description = ""
+    try:
+        desc_choice = input("Choose (1-3): ").strip()
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return False
+
+    if desc_choice == '1':
+        print()
+        print(f"{Colors.DIM}Enter your description. Finish with an empty line:{Colors.RESET}")
+        lines = []
+        try:
+            while True:
+                line = input()
+                if line == "" and lines:
+                    # Second blank line or first blank after content = done
+                    break
+                lines.append(line)
+        except (KeyboardInterrupt, EOFError):
+            pass
+        user_description = "\n".join(lines).strip()
+        if user_description:
+            print(f"  {Colors.GREEN}✓ Description captured ({len(lines)} lines){Colors.RESET}")
+
+    elif desc_choice == '2':
+        import tempfile
+        # Pre-populate template with helpful hints
+        template = (
+            "# Describe what changed and why.\n"
+            "# Lines starting with # are ignored.\n"
+            "# Tip: bullet points with - or •, close issues with 'Closes #N'\n"
+            "#\n\n"
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+            temp_path = tf.name
+            tf.write(template)
+
+        editor = os.environ.get('EDITOR', 'nano')
+        try:
+            subprocess.run([editor, temp_path], check=True)
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            desc_lines = [l.rstrip() for l in raw.splitlines() if not l.strip().startswith('#')]
+            # Strip leading/trailing blank lines
+            while desc_lines and not desc_lines[0]:
+                desc_lines.pop(0)
+            while desc_lines and not desc_lines[-1]:
+                desc_lines.pop()
+            user_description = "\n".join(desc_lines).strip()
+            if user_description:
+                print(f"  {Colors.GREEN}✓ Description captured ({len(desc_lines)} lines){Colors.RESET}")
+            else:
+                print(f"  {Colors.DIM}(empty — skipping description){Colors.RESET}")
+        except Exception as e:
+            print(f"  {Colors.YELLOW}Could not open editor: {e}{Colors.RESET}")
+        finally:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+    # desc_choice == '3' or anything else → skip, user_description stays ""
+
+    # Body: user description (if any) + per-file breakdown
+    body_lines = []
+    if user_description:
+        body_lines.append(user_description)
+        body_lines.append("")  # blank line before file list
+
+    body_lines.append("Files:")
+    for snap in snapshots:
+        lname = _extract_lang_name(snap['lang_code']) if snap.get('lang_code') else '?'
+        patch_lines = snap['patch'].splitlines()
+        adds = sum(1 for l in patch_lines if l.startswith('+') and not l.startswith('+++'))
+        dels = sum(1 for l in patch_lines if l.startswith('-') and not l.startswith('---'))
+        body_lines.append(f"  • {snap['filepath']}  [{lname}]  +{adds}/-{dels}")
+    body_lines += ["", "[gitship-generated]"]
+
+    message = first_line + "\n\n" + "\n".join(body_lines)
+
+    print(f"\n{Colors.BOLD}Commit message:{Colors.RESET}")
+    print(f"{Colors.CYAN}{first_line}{Colors.RESET}")
+    print(f"{Colors.DIM}", end="")
+    for line in body_lines[:6]:
+        print(line)
+    if len(body_lines) > 6:
+        print(f"  (+{len(body_lines)-6} more lines)")
+    print(f"{Colors.RESET}")
+
+    try:
+        confirm = input("Commit this snapshot? (y/n): ").strip().lower()
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        return False
+
+    if confirm not in ('y', 'yes'):
+        print("Commit cancelled — snapshot discarded.")
+        return False
+
+    # ── Atomic commit with snapshot ───────────────────────────────────────────
+    if atomic_commit_with_snapshot:
+        result = atomic_commit_with_snapshot(
+            repo_path=analyzer.repo_path,
+            snapshots=snapshots,
+            commit_message=message,
+        )
+    else:
+        # Fallback: no background AI running, write directly and commit
+        print("\n⚠  gitops not available — plain commit (no stash/restore)")
+        for snap in snapshots:
+            abs_path = analyzer.repo_path / snap['filepath']
+            with open(abs_path, 'w', encoding='utf-8') as fh:
+                fh.write(snap['snapshot_content'])
+            analyzer.run_git(["add", snap['filepath']])
+        result = analyzer.run_git(["commit", "-m", message])
+
+    if result.returncode != 0:
+        print(f"\n{Colors.RED}❌ Commit failed: {result.stderr}{Colors.RESET}")
+        input("Press Enter to continue...")
+        return False
+
+    print(f"\n{Colors.GREEN}✅ Translation snapshot committed!{Colors.RESET}")
+    if result.stdout.strip():
+        print(result.stdout.strip())
+
+    try:
+        push = input("\nPush to remote? (y/n): ").strip().lower()
+        if push in ('y', 'yes'):
+            push_result = analyzer.run_git(["push"])
+            if push_result.returncode == 0:
+                print(f"{Colors.GREEN}✓ Pushed{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}⚠  Push failed: {push_result.stderr}{Colors.RESET}")
+    except KeyboardInterrupt:
+        print("\nPush skipped.")
+
+    input("\nPress Enter to continue...")
+    return True
+
+
 def interactive_commit(analyzer: ChangeAnalyzer):
     """Interactive commit workflow."""
     builder = CommitMessageBuilder(analyzer)
@@ -1597,6 +1967,8 @@ def interactive_commit(analyzer: ChangeAnalyzer):
         lang_count = len(analyzer.changes['translations'])
         total_files = sum(len(files) for files in analyzer.changes['translations'].values())
         print(f"\n{Colors.MAGENTA}🌍 Translations: {total_files} files across {lang_count} languages{Colors.RESET}")
+        print(f"  {Colors.YELLOW}⚠  These are in the ignore list — they will be stashed during commit.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}   To commit them, go back and use option 3 → Lock & commit snapshot.{Colors.RESET}")
     
     if analyzer.changes['tests']:
         print(f"\n{Colors.YELLOW}🧪 Tests: {len(analyzer.changes['tests'])} files{Colors.RESET}")
@@ -2087,7 +2459,29 @@ def main_with_repo(repo_path: Path):
             trans_files = []
             for lang_files in analyzer.changes['translations'].values():
                 trans_files.extend(lang_files)
-            show_diff_menu(analyzer, "Translations", trans_files)
+
+            print(f"\n{'=' * 80}")
+            print("TRANSLATIONS OPTIONS")
+            print("=" * 80)
+            print()
+            print("  1. Review diff  (view what changed — live file, may still be changing)")
+            print("  2. 🔒 Lock & commit snapshot  (freeze this moment, commit it safely)")
+            print("  3. Back to main menu")
+            print()
+            try:
+                trans_choice = input("Choose (1-3): ").strip()
+            except KeyboardInterrupt:
+                print("\n\nBack to main menu.")
+                continue
+
+            if trans_choice == '1':
+                show_diff_menu(analyzer, "Translations", trans_files)
+            elif trans_choice == '2':
+                committed = commit_translations_only(analyzer)
+                if committed:
+                    analyzer.analyze_changes()
+                    analyzer.display_summary()
+            # else: back to main menu
         elif choice == '4' and analyzer.changes['tests']:
             show_diff_menu(analyzer, "Tests", analyzer.changes['tests'])
         elif choice == '5' and analyzer.changes['docs']:
