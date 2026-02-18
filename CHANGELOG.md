@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-02-17
+
+Hotfix: PyPI Workflow Secrets & Staged File Visibility
+
+This release critically repairs the `publish.yml` generation logic that caused workflow validation errors in v0.3.2, and fixes core issues with how staged files are detected.
+
+## 🐛 Critical Bug Fixes
+*   **GitHub Actions Workflow:** Fixed `Unrecognized named-value: 'secrets'` error. The generated `publish.yml` no longer attempts to access `secrets.PYPI_API_TOKEN` inside `if:` conditions (where the secrets context is unavailable). It now relies on step-level logic to handle OIDC fallbacks safely.
+*   **Staged File Visibility:** Fixed a logic error in `commit.py` where files staged with `git add` (Status `A ` or `M `) were invisible to the diff engine.
+*   **License Detection:** Fixed "Unknown" license detection for packages like `yt-dlp` and `Flask`. The scanner now checks `pip` metadata fields before attempting to scrape files.
+
+## 🛠 Improvements
+*   **First Release Support:** Fixed an issue where generating release notes for a repository with *zero* previous tags would result in an empty diff (now correctly resolves the root commit).
+*   **Commit Categorization:** Fixed a bug where files in `other/` or `tests/` categories were excluded from the detailed commit breakdown.
+*   **File Type Detection:** Files without extensions (like `LICENSE` or `Makefile`) are now correctly categorized instead of falling into "Other".
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/commit.py (480 lines changed)
+- UPDATE: src/gitship/licenses.py (262 lines changed)
+- UPDATE: src/gitship/pypi.py (9 lines changed)
+- UPDATE: src/gitship/release.py (29 lines changed)
+
+_4 files changed, 618 insertions(+), 162 deletions(-)_
+
 ## [0.3.2] — 2026-02-17
 
 Fix comment stripping in release notes
