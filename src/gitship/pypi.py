@@ -211,16 +211,17 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
       
       - name: Publish with token (fallback)
-        if: steps.oidc_publish.outcome == 'failure' && secrets.PYPI_API_TOKEN != ''
+        if: steps.oidc_publish.outcome == 'failure'
+        continue-on-error: true
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{{{ secrets.PYPI_API_TOKEN }}}}
       
       - name: Show manual instructions
-        if: steps.oidc_publish.outcome == 'failure' && secrets.PYPI_API_TOKEN == ''
+        if: steps.oidc_publish.outcome == 'failure'
         run: |
-          echo "❌ OIDC failed and no API token found"
-          echo "Manual upload: python -m twine upload dist/*"
+          echo "⚠️  OIDC publish failed. If PYPI_API_TOKEN secret is set, the token step above ran as fallback."
+          echo "If no secret is configured: python -m twine upload dist/*"
 """
     
     return workflow

@@ -90,6 +90,9 @@ def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "
     Show interactive review of changes before generating changelog.
     Returns True if user wants to continue, False to cancel.
     """
+    # If no from_ref (first release, no tags yet), use root commit to cover all history
+    if not from_ref:
+        from_ref = get_first_commit_ref(repo_path)
     try:
         from gitship import review
         
@@ -153,6 +156,19 @@ def get_last_tag(repo_path: Path, prefer_pypi: bool = True) -> str:
         return run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path, check=False)
     except SystemExit:
         return "" # No tags yet
+
+def get_first_commit_ref(repo_path: Path) -> str:
+    """
+    Return the SHA of the very first (root) commit.
+    Used as the 'from' ref when no tags exist yet, so the review/changelog
+    covers the entire history from the very beginning.
+    """
+    try:
+        sha = run_git(["rev-list", "--max-parents=0", "HEAD"], cwd=repo_path, check=False)
+        return sha.strip() if sha.strip() else ""
+    except Exception:
+        return ""
+
 
 def check_remote_tag(repo_path: Path, tag: str) -> bool:
     """Check if tag exists on origin."""
@@ -253,7 +269,12 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
             print(f"{Colors.DIM}Falling back to basic changelog...{Colors.RESET}")
     
     # FALLBACK: Basic implementation
-    range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
+    # When no tag exists yet, show all commits from root to HEAD
+    if last_tag:
+        range_str = f"{last_tag}..HEAD"
+    else:
+        first = get_first_commit_ref(repo_path)
+        range_str = f"{first}..HEAD" if first else "HEAD"
     
     # Get file stats
     stats = ""
@@ -1631,7 +1652,7 @@ def _main_logic(repo_path: Path):
                         prev_tag = get_last_tag(repo_path)
                         
                         print("\n📊 Reviewing changes before regenerating changelog...")
-                        if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
+                        if not show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD"):
                             print("Skipping changelog regeneration.")
                         else:
                             print("\n🔄 Regenerating changelog from git history...")
@@ -1869,7 +1890,7 @@ def _main_logic(repo_path: Path):
                 prev_tag = get_last_tag(repo_path)
                 
                 print("\n📊 Reviewing changes before regenerating changelog...")
-                if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
+                if not show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD"):
                     print("Release cancelled.")
                     return
                 
@@ -1920,7 +1941,7 @@ def _main_logic(repo_path: Path):
     
     # Show review before changelog
     print("\n📊 Reviewing changes before generating changelog...")
-    if not show_review_before_changelog(repo_path, last_tag_full or "HEAD~10", "HEAD"):
+    if not show_review_before_changelog(repo_path, last_tag_full or get_first_commit_ref(repo_path), "HEAD"):
         print("Release cancelled. Reverting pyproject.toml...")
         content = toml.read_text()
         toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{current_ver}"', content, count=1, flags=re.MULTILINE))

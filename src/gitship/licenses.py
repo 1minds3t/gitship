@@ -460,18 +460,173 @@ def get_transitive_dependencies(repo_path: Path) -> Set[str]:
         return set()
 
 
-def detect_license_type(license_text: str) -> str:
-    """Detect license type from license text."""
-    text_upper = license_text.upper()
+def get_license_from_pip(package_name: str) -> Optional[str]:
+    """
+    Get license type from pip show metadata.
     
+    Checks License-Expression (PEP 639, modern) then License (legacy) fields.
+    This is the most reliable source — prefer it over text heuristics.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["pip", "show", package_name],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            # PEP 639 field takes priority (e.g. "License-Expression: MIT")
+            if line.startswith("License-Expression:"):
+                value = line.split(":", 1)[1].strip()
+                if value and value.upper() not in ("", "UNKNOWN", "NONE"):
+                    return _normalize_spdx(value)
+            # Legacy field fallback
+            if line.startswith("License:"):
+                value = line.split(":", 1)[1].strip()
+                if value and value.upper() not in ("", "UNKNOWN", "NONE"):
+                    return _normalize_spdx(value)
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_spdx(license_str: str) -> str:
+    """Normalize common license strings to canonical SPDX identifiers."""
+    # Map of messy strings -> canonical SPDX
+    _ALIASES = {
+        "MIT": "MIT",
+        "BSD": "BSD-3-Clause",
+        "BSD-3": "BSD-3-Clause",
+        "BSD3": "BSD-3-Clause",
+        "BSD-2": "BSD-2-Clause",
+        "BSD2": "BSD-2-Clause",
+        "APACHE": "Apache-2.0",
+        "APACHE 2": "Apache-2.0",
+        "APACHE-2": "Apache-2.0",
+        "APACHE2": "Apache-2.0",
+        "APACHE 2.0": "Apache-2.0",
+        "APACHE LICENSE 2.0": "Apache-2.0",
+        "GPL": "GPL-2.0",
+        "GPL2": "GPL-2.0",
+        "GPL-2": "GPL-2.0",
+        "GPL3": "GPL-3.0",
+        "GPL-3": "GPL-3.0",
+        "LGPL": "LGPL-2.1",
+        "LGPL2": "LGPL-2.1",
+        "LGPL-2": "LGPL-2.1",
+        "LGPL3": "LGPL-3.0",
+        "LGPL-3": "LGPL-3.0",
+        "MPL": "MPL-2.0",
+        "MPL2": "MPL-2.0",
+        "MPL-2": "MPL-2.0",
+        "ISC": "ISC",
+        "PSF": "PSF-2.0",
+        "PYTHON": "PSF-2.0",
+        "UNLICENSE": "Unlicense",
+        "THE UNLICENSE": "Unlicense",
+        "AGPL": "AGPL-3.0",
+        "AGPL-3": "AGPL-3.0",
+        "AGPL3": "AGPL-3.0",
+        "CC0": "CC0-1.0",
+        "CC0-1": "CC0-1.0",
+        "WTFPL": "WTFPL",
+    }
+    key = license_str.strip().upper()
+    return _ALIASES.get(key, license_str.strip())
+
+
+def detect_license_type(license_text: str, package_name: Optional[str] = None) -> str:
+    """
+    Detect license type, using pip metadata first for accuracy.
+    
+    Strategy (in order):
+      1. pip show License-Expression / License field  — most reliable
+      2. PyPI JSON API license_expression / classifiers — good fallback
+      3. Text heuristics on the license file            — last resort
+    
+    Args:
+        license_text: Contents of the license file (used as last resort).
+        package_name:  If provided, pip/PyPI metadata is checked first.
+    """
+    # --- 1. pip metadata (fastest, most authoritative) ---
+    if package_name:
+        pip_license = get_license_from_pip(package_name)
+        if pip_license:
+            return pip_license
+        
+        # --- 2. PyPI JSON classifiers ---
+        pypi_license = _get_license_from_pypi_classifiers(package_name)
+        if pypi_license:
+            return pypi_license
+
+    # --- 3. Text heuristics ---
+    return _detect_license_from_text(license_text)
+
+
+def _get_license_from_pypi_classifiers(package_name: str) -> Optional[str]:
+    """Extract license from PyPI JSON classifiers or license_expression field."""
+    url = f"https://pypi.org/pypi/{package_name}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = json.loads(response.read())
+            info = data.get("info", {})
+            
+            # PEP 639 field in PyPI API
+            expr = info.get("license_expression") or info.get("license")
+            if expr and expr.strip().upper() not in ("", "UNKNOWN", "NONE"):
+                return _normalize_spdx(expr.strip())
+            
+            # Trove classifiers
+            for classifier in info.get("classifiers", []):
+                if classifier.startswith("License ::"):
+                    parts = [p.strip() for p in classifier.split("::")]
+                    # e.g. "License :: OSI Approved :: MIT License"
+                    if len(parts) >= 3:
+                        label = parts[-1]
+                        # Quick mapping of common classifier labels
+                        _clf_map = {
+                            "MIT License": "MIT",
+                            "BSD License": "BSD-3-Clause",
+                            "Apache Software License": "Apache-2.0",
+                            "GNU General Public License v2 (GPLv2)": "GPL-2.0",
+                            "GNU General Public License v3 (GPLv3)": "GPL-3.0",
+                            "GNU Lesser General Public License v2 (LGPLv2)": "LGPL-2.1",
+                            "GNU Lesser General Public License v3 (LGPLv3)": "LGPL-3.0",
+                            "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
+                            "ISC License (ISCL)": "ISC",
+                            "Python Software Foundation License": "PSF-2.0",
+                            "The Unlicense (Unlicense)": "Unlicense",
+                        }
+                        if label in _clf_map:
+                            return _clf_map[label]
+    except Exception:
+        pass
+    return None
+
+
+def _detect_license_from_text(license_text: str) -> str:
+    """Heuristic license detection from license file text (last resort)."""
+    text_upper = license_text.upper()
+
     if 'MIT LICENSE' in text_upper or 'MIT/X CONSORTIUM LICENSE' in text_upper:
+        return 'MIT'
+    # Bare "Permission is hereby granted" with MIT phrasing
+    elif 'PERMISSION IS HEREBY GRANTED, FREE OF CHARGE' in text_upper and 'MIT' not in text_upper:
         return 'MIT'
     elif 'APACHE LICENSE' in text_upper and 'VERSION 2.0' in text_upper:
         return 'Apache-2.0'
     elif 'BSD 3-CLAUSE' in text_upper or ('BSD' in text_upper and 'THREE CLAUSE' in text_upper):
         return 'BSD-3-Clause'
+    # BSD-3 canonical boilerplate detection
+    elif ('REDISTRIBUTIONS OF SOURCE CODE MUST RETAIN' in text_upper
+          and 'REDISTRIBUTIONS IN BINARY FORM MUST REPRODUCE' in text_upper
+          and 'NEITHER THE NAME' in text_upper):
+        return 'BSD-3-Clause'
     elif 'BSD 2-CLAUSE' in text_upper or ('BSD' in text_upper and 'TWO CLAUSE' in text_upper):
         return 'BSD-2-Clause'
+    elif 'GNU AFFERO GENERAL PUBLIC LICENSE' in text_upper:
+        return 'AGPL-3.0'
     elif 'GNU GENERAL PUBLIC LICENSE' in text_upper:
         if 'VERSION 3' in text_upper:
             return 'GPL-3.0'
@@ -485,10 +640,17 @@ def detect_license_type(license_text: str) -> str:
     elif 'MOZILLA PUBLIC LICENSE' in text_upper:
         return 'MPL-2.0'
     elif 'PYTHON SOFTWARE FOUNDATION' in text_upper:
-        return 'PSF'
-    elif 'ISC LICENSE' in text_upper:
+        return 'PSF-2.0'
+    elif 'ISC LICENSE' in text_upper or 'ISC LICENCE' in text_upper:
         return 'ISC'
-    
+    elif 'THIS IS FREE AND UNENCUMBERED SOFTWARE RELEASED INTO THE PUBLIC DOMAIN' in text_upper:
+        return 'Unlicense'
+    elif 'CREATIVE COMMONS ZERO' in text_upper or 'CC0' in text_upper:
+        return 'CC0-1.0'
+    elif 'PERMISSION IS HEREBY GRANTED, FREE OF CHARGE' in text_upper:
+        # Generic MIT-like
+        return 'MIT'
+
     return 'Unknown'
 
 
@@ -551,10 +713,10 @@ def generate_third_party_notices(repo_path: Path):
         except:
             pass
         
-        # Read license to detect type
+        # Read license to detect type — pass package name so pip metadata is checked first
         try:
             license_text = license_file.read_text(encoding='utf-8', errors='ignore')
-            license_type = detect_license_type(license_text)
+            license_type = detect_license_type(license_text, package_name=pkg_name)
         except:
             license_type = "Unknown"
         
@@ -577,6 +739,83 @@ def generate_third_party_notices(repo_path: Path):
     # Automatically update pyproject.toml
     print("\n📝 Updating pyproject.toml with license files...")
     update_pyproject_license_files(repo_path)
+
+
+def update_third_party_notices(repo_path: Path):
+    """
+    Re-scan an existing THIRD_PARTY_NOTICES.txt and fix any 'Unknown' license entries.
+    
+    Uses the smarter detect_license_type (pip metadata → PyPI classifiers → text)
+    to resolve packages that were previously labeled Unknown.  Only touches lines
+    that say "License: Unknown"; everything else is left exactly as-is.
+    """
+    import re
+    import subprocess
+
+    notices_path = repo_path / "THIRD_PARTY_NOTICES.txt"
+    if not notices_path.exists():
+        print("❌ THIRD_PARTY_NOTICES.txt not found")
+        print("💡 Run option 4 to generate it first")
+        return
+
+    content = notices_path.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=True)
+
+    fixed = 0
+    skipped = 0
+    result_lines = []
+    i = 0
+
+    # Pattern: a package header line like "Flask (v3.1.2)\n" immediately followed
+    # by "License: Unknown\n".  We scan line-by-line.
+    pkg_pattern = re.compile(r'^(\S[^\n]+?)(?:\s+\(v[^\)]+\))?\s*$')
+
+    current_pkg = None
+    while i < len(lines):
+        line = lines[i]
+
+        # Try to detect a package name line (non-empty, not a separator/header)
+        stripped = line.rstrip('\n')
+        if (stripped and
+                not stripped.startswith("=") and
+                not stripped.startswith("License:") and
+                not stripped.startswith("See ") and
+                not stripped.startswith("#")):
+            # Extract package name (strip version like "(v3.1.2)")
+            m = re.match(r'^([\w][\w\-\.]+)', stripped)
+            if m:
+                current_pkg = m.group(1)
+
+        # Fix "License: Unknown" lines
+        if stripped == "License: Unknown" and current_pkg:
+            # Try pip first, then PyPI classifiers (skip text — we don't have it here)
+            resolved = get_license_from_pip(current_pkg)
+            if not resolved:
+                resolved = _get_license_from_pypi_classifiers(current_pkg)
+            
+            if resolved:
+                new_line = f"License: {resolved}\n"
+                print(f"  ✅ {current_pkg:30s}  Unknown → {resolved}")
+                result_lines.append(new_line)
+                fixed += 1
+                i += 1
+                continue
+            else:
+                print(f"  ⚠️  {current_pkg:30s}  still Unknown (no metadata found)")
+                skipped += 1
+
+        result_lines.append(line)
+        i += 1
+
+    if fixed == 0 and skipped == 0:
+        print("✅ No 'Unknown' license entries found — nothing to update")
+        return
+
+    if fixed > 0:
+        notices_path.write_text("".join(result_lines), encoding="utf-8")
+        print(f"\n✅ Updated {notices_path.name}: {fixed} fixed, {skipped} still unknown")
+    else:
+        print(f"\n⚠️  Could not resolve any Unknown entries ({skipped} remain)")
 
 
 def update_pyproject_license_files(repo_path: Path):
@@ -1085,10 +1324,11 @@ def interactive_licenses(repo_path: Path):
         print("  9. Add licenses/ to .gitignore")
         print(" 10. Generate requirements.txt" + (" (update)" if has_requirements else " (pip-compile)"))
         print(" 11. Update pyproject.toml [tool.setuptools] license-files")
+        print(" 12. Fix 'Unknown' licenses in THIRD_PARTY_NOTICES.txt" + (" ✏️" if has_notices else " (no file yet)"))
         print("  0. Exit")
         
         try:
-            choice = input("\nChoice (0-11): ").strip()
+            choice = input("\nChoice (0-12): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n")
             return
@@ -1204,4 +1444,8 @@ def interactive_licenses(repo_path: Path):
         
         elif choice == '11':
             update_pyproject_license_files(repo_path)
+            input("\nPress Enter to continue...")
+        
+        elif choice == '12':
+            update_third_party_notices(repo_path)
             input("\nPress Enter to continue...")

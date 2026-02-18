@@ -331,12 +331,19 @@ class ChangeAnalyzer:
             self.changes['tests'].append({'path': filepath, 'status': status})
         
         # Documentation
-        elif filepath.endswith(('.md', '.rst', '.txt')):
+        elif (filepath.endswith(('.md', '.rst', '.txt'))
+              or Path(filepath).name in ('LICENSE', 'LICENCE', 'COPYING', 'NOTICE',
+                                         'CHANGELOG', 'AUTHORS', 'CONTRIBUTORS',
+                                         'README', 'INSTALL', 'HISTORY', 'NEWS')):
             self.changes['docs'].append({'path': filepath, 'status': status})
         
         # Config files
-        elif filepath.endswith(('.toml', '.ini', '.cfg', '.yaml', '.yml', '.json')) or \
-             filepath in ('.gitignore', '.dockerignore', 'Makefile', '.gitattributes'):
+        elif (filepath.endswith(('.toml', '.ini', '.cfg', '.yaml', '.yml', '.json',
+                                  '.lock', '.env', '.env.example'))
+              or filepath in ('.gitignore', '.dockerignore', 'Makefile', '.gitattributes',
+                              'Dockerfile', 'docker-compose.yml', 'MANIFEST.in',
+                              'setup.py', 'setup.cfg', 'tox.ini', 'Procfile')
+              or Path(filepath).name in ('MANIFEST.in', 'Pipfile', 'Brewfile')):
             self.changes['config'].append({'path': filepath, 'status': status})
         
         # Code files
@@ -556,21 +563,26 @@ class CommitMessageBuilder:
                     description_lines.append(f"  • {item['old']} → {item['new']}")
         
         # Add new files (ALL of them, no limit)
+        # Use .strip() so 'A ' (staged) matches the same as '??' or 'A'
+        def _is_new(item):
+            s = item['status'].strip()
+            return s in ('??', 'A') or item['status'][0] == 'A'
+        
         new_files = []
         for item in changes['code']:
-            if item['status'] in ('??', 'A') and 'rename_from' not in item:
+            if _is_new(item) and 'rename_from' not in item:
                 new_files.append(item)
         for item in changes['tests']:
-            if item['status'] in ('??', 'A'):
+            if _is_new(item):
                 new_files.append(item)
         for item in changes['docs']:
-            if item['status'] in ('??', 'A'):
+            if _is_new(item):
                 new_files.append(item)
         for item in changes['config']:
-            if item['status'] in ('??', 'A'):
+            if _is_new(item):
                 new_files.append(item)
         for item in changes['other']:
-            if item['status'] in ('??', 'A'):
+            if _is_new(item):
                 new_files.append(item)
         
         if new_files:
@@ -588,17 +600,17 @@ class CommitMessageBuilder:
                 except:
                     description_lines.append(f"  • {item['path']}")
         
-        # Add modified files (ALL of them, no limit)
+        # Add modified files (ALL of them, no limit) — covers ALL categories
         modified_files = []
-        for item in changes['code']:
-            # Status can be " M", "M ", "MM", etc - check if M is present
-            if 'M' in item['status'] and 'rename_from' not in item:
-                modified_files.append(item)
-        for item in changes['config']:
-            if 'M' in item['status']:
-                modified_files.append(item)
-        for item in changes['docs']:
-            if 'M' in item['status']:
+        _all_categorized = (
+            [(item, True) for item in changes['code']]   # (item, check_rename)
+            + [(item, False) for item in changes['config']]
+            + [(item, False) for item in changes['docs']]
+            + [(item, False) for item in changes['tests']]
+            + [(item, False) for item in changes['other']]
+        )
+        for item, check_rename in _all_categorized:
+            if 'M' in item['status'] and (not check_rename or 'rename_from' not in item):
                 modified_files.append(item)
         
         if modified_files:
@@ -680,51 +692,101 @@ class CommitMessageBuilder:
             return f"Update translation files ({lang_count} languages)"
 
 
+def pick_files_to_review(files: List[Dict]) -> List[Dict]:
+    """Show a numbered list and let the user exclude files before reviewing.
+    
+    Returns the filtered list (all files if user skips / presses Enter).
+    """
+    if len(files) <= 1:
+        return files  # Nothing to exclude
+
+    print()
+    print("  Files included in this review:")
+    for i, item in enumerate(files, 1):
+        if 'old' in item:
+            label = f"{item['old']} → {item['new']}"
+        else:
+            label = item['path']
+        print(f"    {i:2}. {label}")
+
+    print()
+    print("  Enter numbers to EXCLUDE (e.g. 3  or  1 4 5), or press Enter to include all:")
+    try:
+        raw = input("  Exclude: ").strip()
+    except KeyboardInterrupt:
+        return files
+
+    if not raw:
+        return files
+
+    excluded_idxs = set()
+    for part in raw.split():
+        try:
+            n = int(part)
+            if 1 <= n <= len(files):
+                excluded_idxs.add(n - 1)
+        except ValueError:
+            pass
+
+    if not excluded_idxs:
+        return files
+
+    kept = [f for i, f in enumerate(files) if i not in excluded_idxs]
+    print(f"  → Showing {len(kept)} of {len(files)} files")
+    return kept
+
+
 def show_diff_menu(analyzer: ChangeAnalyzer, category: str, files: List[Dict]):
-    """Show hierarchical diff viewing menu for a category."""
+    """Show hierarchical diff viewing menu for a category — loops until user goes back."""
     print(f"\n{'=' * 80}")
     print(f"{category.upper()} CHANGES - Review Options")
     print("=" * 80)
     print(f"\nFiles to review: {len(files)}")
-    print()
-    print("Review options:")
-    print("  1. Summary only (--shortstat)")
-    print("  2. File list with stats (--stat)")
-    print("  3. Full diff (--patch)")
-    print("  4. Export diff to file")
-    
-    # Add special option for renames
-    if files and 'old' in files[0]:
-        print("  5. Stage renames properly (git rm + git add)")
-        print("  6. Back to main menu")
-        max_choice = 6
-    else:
-        print("  5. Back to main menu")
-        max_choice = 5
-    
-    print()
-    
-    try:
-        choice = input(f"Choose option (1-{max_choice}): ").strip()
-    except KeyboardInterrupt:
-        print("\n\nBack to main menu.")
+
+    has_renames = files and 'old' in files[0]
+
+    # Let user exclude specific files before reviewing
+    files = pick_files_to_review(files)
+    if not files:
+        print("  (all files excluded — nothing to review)")
         return
-    
-    if choice == '1':
-        show_shortstat(analyzer, files)
-    elif choice == '2':
-        show_stat(analyzer, files)
-    elif choice == '3':
-        show_full_diff(analyzer, files)
-    elif choice == '4':
-        export_diff_to_file(analyzer, files, category)
-    elif choice == '5' and max_choice == 6:
-        # Stage renames properly
-        stage_renames(analyzer, files)
-    elif choice == str(max_choice):
-        return
-    else:
-        print("Invalid choice.")
+
+    while True:
+        print()
+        print("Review options:")
+        print("  1. Summary only (--shortstat)")
+        print("  2. File list with stats (--stat)")
+        print("  3. Full diff (--patch)")
+        print("  4. Export diff to file")
+        if has_renames:
+            print("  5. Stage renames properly (git rm + git add)")
+            print("  6. Back to main menu")
+            max_choice = 6
+        else:
+            print("  5. Back to main menu")
+            max_choice = 5
+        print()
+
+        try:
+            choice = input(f"Choose option (1-{max_choice}): ").strip()
+        except KeyboardInterrupt:
+            print("\n\nBack to main menu.")
+            return
+
+        if choice == '1':
+            show_shortstat(analyzer, files)
+        elif choice == '2':
+            show_stat(analyzer, files)
+        elif choice == '3':
+            show_full_diff(analyzer, files)
+        elif choice == '4':
+            export_diff_to_file(analyzer, files, category)
+        elif choice == '5' and has_renames:
+            stage_renames(analyzer, files)
+        elif choice == str(max_choice):
+            return
+        else:
+            print("Invalid choice.")
 
 
 def stage_renames(analyzer: ChangeAnalyzer, files: List[Dict]):
@@ -829,14 +891,12 @@ def show_shortstat(analyzer: ChangeAnalyzer, files: List[Dict]):
     # Show shortstat for modified files
     modified_paths = [f['path'] for f in files if f['status'].strip() in ('M', 'MM') or 'M' in f['status']]
     if modified_paths:
-        # Try unstaged changes first
-        result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
+        # Try staged first (covers 'A ', 'M '), then unstaged, then HEAD
+        result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
         
-        # If no unstaged changes, try staged
         if result.returncode != 0 or not result.stdout.strip():
-            result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
+            result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
         
-        # If still nothing, try against HEAD
         if result.returncode != 0 or not result.stdout.strip():
             result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
         
@@ -845,7 +905,7 @@ def show_shortstat(analyzer: ChangeAnalyzer, files: List[Dict]):
             print(result.stdout)
     
     # Count new/deleted files
-    new_count = sum(1 for f in files if f['status'] in ('??', 'A'))
+    new_count = sum(1 for f in files if f['status'].strip() in ('??', 'A') or f['status'][:1] == 'A')
     deleted_count = sum(1 for f in files if f['status'] == 'D')
     
     if new_count > 0:
@@ -928,17 +988,17 @@ def export_diff_to_file(analyzer: ChangeAnalyzer, files: List[Dict], category: s
                 modified_paths = [f['path'] for f in files if f['status'].strip() in ('M', 'MM') or 'M' in f['status']]
                 
                 if modified_paths:
-                    result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
+                    result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
                     if result.returncode != 0 or not result.stdout.strip():
-                        result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
+                        result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
                     if result.returncode != 0 or not result.stdout.strip():
                         result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
                     
                     if result.returncode == 0 and result.stdout.strip():
                         f.write(result.stdout + "\n")
                 
-                new_count = sum(1 for item in files if item['status'] in ('??', 'A'))
-                deleted_count = sum(1 for item in files if item['status'] == 'D')
+                new_count = sum(1 for item in files if item['status'].strip() in ('??', 'A') or item['status'][:1] == 'A')
+                deleted_count = sum(1 for item in files if item['status'].strip() == 'D' or item['status'][:1] == 'D')
                 
                 if new_count > 0:
                     f.write(f"New files: {new_count}\n")
@@ -1066,16 +1126,14 @@ def export_diff_to_file(analyzer: ChangeAnalyzer, files: List[Dict], category: s
                         except Exception as e:
                             f.write(f"Error reading file: {e}\n\n")
                     else:
-                        # For modified files, use git diff
-                        # Try unstaged diff first
-                        result = analyzer.run_git(diff_args + ["--", path])
-                        
-                        # If no unstaged changes, try staged
-                        if result.returncode != 0 or not result.stdout.strip():
+                        x_col = status[0] if len(status) >= 1 else ' '
+                        y_col = status[1] if len(status) >= 2 else ' '
+                        result = None
+                        if x_col not in (' ', '?'):
                             result = analyzer.run_git(diff_args + ["--staged", "--", path])
-                        
-                        # If still nothing, try against HEAD
-                        if result.returncode != 0 or not result.stdout.strip():
+                        if y_col not in (' ', '?') and (result is None or not result.stdout.strip()):
+                            result = analyzer.run_git(diff_args + ["--", path])
+                        if result is None or not result.stdout.strip():
                             result = analyzer.run_git(diff_args + ["HEAD", "--", path])
                         
                         if result.returncode == 0 and result.stdout.strip():
@@ -1245,37 +1303,38 @@ def show_stat(analyzer: ChangeAnalyzer, files: List[Dict]):
         
         elif status == 'D':
             print("  [DELETED]")
-        elif status in ('??', 'A'):
-            try:
-                with open(analyzer.repo_path / filepath, 'r') as f:
-                    lines = len(f.readlines())
-                print(f"  [NEW FILE - {lines} lines]")
-            except:
-                print("  [NEW FILE]")
-        elif status in ('M', 'MM', ' M', 'M '):
-            # Try unstaged changes first (working tree vs index)
-            result = analyzer.run_git(["diff", "--stat", filepath])
+        else:
+            # Handles '??', 'A', 'A ', 'M', 'MM', 'M ', ' M', and any other status.
+            x_col = status[0] if len(status) >= 1 else ' '
+            y_col = status[1] if len(status) >= 2 else ' '
+            is_new = x_col in ('A', '?') or y_col in ('?',)
             
-            # If no unstaged changes, try staged changes
-            if result.returncode != 0 or not result.stdout.strip():
-                result = analyzer.run_git(["diff", "--stat", "--staged", filepath])
-            
-            # If still nothing, try against HEAD
-            if result.returncode != 0 or not result.stdout.strip():
-                result = analyzer.run_git(["diff", "--stat", "HEAD", filepath])
-            
-            if result.returncode == 0 and result.stdout.strip():
-                # Parse the stat output to just show the summary line
-                stat_lines = result.stdout.strip().split('\n')
-                # The last line usually has the summary (e.g., "1 file changed, 2 insertions(+), 2 deletions(-)")
-                # But we want the file-specific line which might be the first or only line
-                for line in stat_lines:
-                    if filepath in line or '|' in line:
-                        print(f"  {line}")
-                        break
-                else:
-                    # Just print all of it if we can't find the right line
-                    print(f"  {result.stdout.strip()}")
+            if is_new or status.strip() in ('??', 'A'):
+                # New / untracked file — just report line count
+                try:
+                    with open(analyzer.repo_path / filepath, 'r') as f:
+                        lines = len(f.readlines())
+                    print(f"  [NEW FILE - {lines} lines]")
+                except Exception:
+                    print("  [NEW FILE]")
+            else:
+                # Modified file — try staged first (covers 'M ', 'A '), then unstaged, then HEAD
+                result = analyzer.run_git(["diff", "--stat", "--staged", "--", filepath])
+                
+                if result.returncode != 0 or not result.stdout.strip():
+                    result = analyzer.run_git(["diff", "--stat", "--", filepath])
+                
+                if result.returncode != 0 or not result.stdout.strip():
+                    result = analyzer.run_git(["diff", "--stat", "HEAD", "--", filepath])
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    stat_lines = result.stdout.strip().split("\n")
+                    for line in stat_lines:
+                        if filepath in line or "|" in line:
+                            print(f"  {line}")
+                            break
+                    else:
+                        print(f"  {result.stdout.strip()}")
     
     print()
     input("Press Enter to continue...")
@@ -1379,52 +1438,81 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
                     print(f"\n... ({len(lines) - 30} more lines)")
         
         elif status in ('??', 'A'):
-            try:
-                with open(analyzer.repo_path / filepath, 'r') as f:
-                    content = f.read()
-                    lines = content.split('\n')
+            abs_path = analyzer.repo_path / filepath
+            if abs_path.is_dir():
+                dir_files = sorted(abs_path.rglob('*'))
+                file_entries = [f for f in dir_files if f.is_file()]
+                print(f"NEW DIRECTORY ({len(file_entries)} files):")
+                for sub in file_entries:
+                    rel = sub.relative_to(analyzer.repo_path)
+                    try:
+                        sub_content = sub.read_text(encoding='utf-8', errors='replace')
+                        sub_lines = sub_content.split('\n')
+                        print(f"\n  \U0001f4c4 {rel}  ({len(sub_lines)} lines)")
+                        print("  " + "-" * 60)
+                        for line in sub_lines[:20]:
+                            print(f"  {Colors.GREEN}+{line}{Colors.RESET}")
+                        if len(sub_lines) > 20:
+                            print(f"  {Colors.DIM}  ... {len(sub_lines)-20} more lines{Colors.RESET}")
+                    except Exception as e:
+                        print(f"  \U0001f4c4 {rel}  (could not read: {e})")
+            else:
+                try:
+                    file_content = abs_path.read_text(encoding='utf-8', errors='replace')
+                    lines = file_content.split('\n')
                     preview = '\n'.join(lines[:30])
                     print(f"NEW FILE ({len(lines)} lines):\n{preview}")
                     if len(lines) > 30:
                         print(f"\n... ({len(lines) - 30} more lines)")
-            except Exception as e:
-                print(f"  (Could not read: {e})")
+                except Exception as e:
+                    print(f"  (Could not read: {e})")
         
-        elif status in ('M', 'MM', ' M', 'M '):
-            # Determine which diff to show based on status
-            # ' M' = unstaged only -> use 'git diff'
-            # 'M ' = staged only -> use 'git diff --staged'  
-            # 'MM' = both staged and unstaged -> show unstaged (working tree)
-            # 'M' = generic modified -> try unstaged first
+        else:
+            # Catch-all: handles M, MM, M , ' M', 'A ', 'A', and any other status.
+            x_col = status[0] if len(status) >= 1 else ' '
+            y_col = status[1] if len(status) >= 2 else ' '
             
-            # Try unstaged changes first (working tree vs index)
-            result = analyzer.run_git(["diff", "--color=always", filepath])
+            result = None
+            printed_raw = False
             
-            # If no unstaged changes, try staged changes
-            if result.returncode != 0 or not result.stdout.strip():
-                result = analyzer.run_git(["diff", "--color=always", "--staged", filepath])
+            if x_col not in (' ', '?'):
+                result = analyzer.run_git(["diff", "--color=always", "--staged", "--", filepath])
             
-            # If still nothing, try against HEAD
-            if result.returncode != 0 or not result.stdout.strip():
-                result = analyzer.run_git(["diff", "--color=always", "HEAD", filepath])
+            if y_col not in (' ', '?') and (result is None or not result.stdout.strip()):
+                result = analyzer.run_git(["diff", "--color=always", "--", filepath])
             
-            if result.returncode == 0 and result.stdout:
-                # Strip only the git file headers but keep hunk headers (@@ lines) and content
-                lines = result.stdout.splitlines()
-                cleaned_lines = []
-                for line in lines:
-                    plain = strip_ansi(line)
-                    # Skip only the file metadata headers, keep everything else including @@ hunk headers
-                    if plain.startswith(('diff --git', 'index ', '---', '+++')):
-                        continue
-                    cleaned_lines.append(line)
-                
-                if cleaned_lines:
-                    print('\n'.join(cleaned_lines))
+            if result is None or not result.stdout.strip():
+                result = analyzer.run_git(["diff", "--color=always", "HEAD", "--", filepath])
+            
+            if result is None or not result.stdout.strip():
+                abs_path = analyzer.repo_path / filepath
+                if abs_path.is_file():
+                    try:
+                        file_content = abs_path.read_text(encoding='utf-8', errors='replace')
+                        file_lines = file_content.split('\n')
+                        print(f"NEW FILE ({len(file_lines)} lines):")
+                        for fline in file_lines:
+                            print(f"{Colors.GREEN}+{fline}{Colors.RESET}")
+                        printed_raw = True
+                    except Exception as e:
+                        print(f"  (Could not read: {e})")
+                        printed_raw = True
+            
+            if not printed_raw:
+                if result is not None and result.stdout:
+                    lines = result.stdout.splitlines()
+                    cleaned_lines = []
+                    for line in lines:
+                        plain = strip_ansi(line)
+                        if plain.startswith(('diff --git', 'index ', '---', '+++')):
+                            continue
+                        cleaned_lines.append(line)
+                    if cleaned_lines:
+                        print('\n'.join(cleaned_lines))
+                    else:
+                        print(f"{Colors.DIM}(no diff content){Colors.RESET}")
                 else:
-                    print(f"{Colors.DIM}(no diff content){Colors.RESET}")
-            else:
-                print(f"{Colors.DIM}(no changes){Colors.RESET}")
+                    print(f"{Colors.DIM}(no changes detected){Colors.RESET}")
     
     print()
     input("Press Enter to continue...")
@@ -2413,6 +2501,105 @@ def clean_untracked_files(analyzer: ChangeAnalyzer):
     input("\nPress Enter to continue...")
 
 
+def review_all_changes(analyzer: ChangeAnalyzer):
+    """Review ALL changed files together in one diff view — flattens all categories."""
+    # Collect every file across all categories (translations have their own flow)
+    all_files = []
+
+    for item in analyzer.changes['renames']:
+        all_files.append(item)  # renames keep their {old, new} shape
+
+    for item in analyzer.changes['code']:
+        all_files.append(item)
+    for item in analyzer.changes['tests']:
+        all_files.append(item)
+    for item in analyzer.changes['docs']:
+        all_files.append(item)
+    for item in analyzer.changes['config']:
+        all_files.append(item)
+    for item in analyzer.changes['other']:
+        all_files.append(item)
+
+    # Also include translations (flattened) so nothing is hidden
+    for lang_files in analyzer.changes['translations'].values():
+        for item in lang_files:
+            all_files.append(item)
+
+    if not all_files:
+        print("\n  (no changes to review)")
+        input("Press Enter to continue...")
+        return
+
+    # Count by category for the header
+    summary_parts = []
+    if analyzer.changes['renames']:
+        summary_parts.append(f"{len(analyzer.changes['renames'])} rename(s)")
+    if analyzer.changes['code']:
+        summary_parts.append(f"{len(analyzer.changes['code'])} code")
+    if analyzer.changes['tests']:
+        summary_parts.append(f"{len(analyzer.changes['tests'])} test(s)")
+    if analyzer.changes['docs']:
+        summary_parts.append(f"{len(analyzer.changes['docs'])} doc(s)")
+    if analyzer.changes['config']:
+        summary_parts.append(f"{len(analyzer.changes['config'])} config")
+    if analyzer.changes['other']:
+        summary_parts.append(f"{len(analyzer.changes['other'])} other")
+    trans_count = sum(len(f) for f in analyzer.changes['translations'].values())
+    if trans_count:
+        summary_parts.append(f"{trans_count} translation(s)")
+
+    print(f"\n{'=' * 80}")
+    print("ALL CHANGES — Combined Review")
+    print("=" * 80)
+    print(f"\n  {len(all_files)} files  ({', '.join(summary_parts)})")
+    print()
+    print("  File list:")
+    for item in all_files:
+        if 'old' in item:
+            print(f"    🔄 {item['old']} → {item['new']}")
+        else:
+            icon = analyzer._get_status_icon(item.get('status', ''))
+            print(f"    {icon} {item['path']}")
+
+    # Build reviewable file list (exclude pure rename entries which have no 'path')
+    regular_files = [f for f in all_files if 'path' in f]
+
+    # Let user exclude specific files before reviewing
+    regular_files = pick_files_to_review(regular_files)
+    if not regular_files:
+        print("  (all files excluded)")
+        return
+
+    while True:
+        print()
+        print("  Review options:")
+        print("  1. Shortstat   (summary counts)")
+        print("  2. File stats  (per-file line counts)")
+        print("  3. Full diff   (entire patch — may be long)")
+        print("  4. Export      (write full diff to ~/gitship_exports/)")
+        print("  5. Back to main menu")
+        print()
+
+        try:
+            choice = input("Choose (1-5): ").strip()
+        except KeyboardInterrupt:
+            print("\n\nBack to main menu.")
+            return
+
+        if choice == '1':
+            show_shortstat(analyzer, regular_files)
+        elif choice == '2':
+            show_stat(analyzer, regular_files)
+        elif choice == '3':
+            show_full_diff(analyzer, regular_files)
+        elif choice == '4':
+            export_diff_to_file(analyzer, regular_files, "all_changes")
+        elif choice == '5':
+            return
+        else:
+            print("  Invalid choice.")
+
+
 def main_with_repo(repo_path: Path):
     """Main function for menu integration."""
     # Auto-scan dependencies before analyzing
@@ -2433,6 +2620,7 @@ def main_with_repo(repo_path: Path):
     # Main menu loop
     while True:
         print("\nWhat would you like to do?")
+        print("  0. Review ALL changes together")
         print("  1. Review renames")
         print("  2. Review code changes")
         print("  3. Review translation changes")
@@ -2445,12 +2633,14 @@ def main_with_repo(repo_path: Path):
         print()
         
         try:
-            choice = input("Choose option (1-9): ").strip()
+            choice = input("Choose option (0-9): ").strip()
         except KeyboardInterrupt:
             print("\n\nCancelled.")
             sys.exit(0)
         
-        if choice == '1' and analyzer.changes['renames']:
+        if choice == '0':
+            review_all_changes(analyzer)
+        elif choice == '1' and analyzer.changes['renames']:
             show_diff_menu(analyzer, "Renamed Files", analyzer.changes['renames'])
         elif choice == '2' and analyzer.changes['code']:
             show_diff_menu(analyzer, "Code", analyzer.changes['code'])
