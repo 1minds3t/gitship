@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-02-18
+
+Update license to AGPL.
+
+📝 RELEASE NOTES — gitship v0.3.5
+Update License to AGPL-3
+
+What’s New
+
+📝 License Change
+
+The project license has been updated from MIT to AGPL-3.0.
+This ensures that all derivative work, including hosted or SaaS versions, must remain open and freely available under the same license.
+	•	LICENSE file updated to AGPL-3.0
+	•	Legal and compliance alignment for collaborative and server-side usage
+
+No functional changes were made to the code — this release is purely legal and licensing.
+
+⸻
+
+Full Changelog: v0.3.4 → v0.3.5
+	•	docs: Update license to AGPL (commit c7d4773)
+
+---
+
+_1 file changed, 23 insertions(+), 19 deletions(-)_
+
 ## [0.3.4] — 2026-02-18
 
 The Self-Aware Release Update
