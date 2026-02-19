@@ -90,9 +90,6 @@ def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "
     Show interactive review of changes before generating changelog.
     Returns True if user wants to continue, False to cancel.
     """
-    # If no from_ref (first release, no tags yet), use root commit to cover all history
-    if not from_ref:
-        from_ref = get_first_commit_ref(repo_path)
     try:
         from gitship import review
         
@@ -157,23 +154,83 @@ def get_last_tag(repo_path: Path, prefer_pypi: bool = True) -> str:
     except SystemExit:
         return "" # No tags yet
 
-def get_first_commit_ref(repo_path: Path) -> str:
-    """
-    Return the SHA of the very first (root) commit.
-    Used as the 'from' ref when no tags exist yet, so the review/changelog
-    covers the entire history from the very beginning.
-    """
-    try:
-        sha = run_git(["rev-list", "--max-parents=0", "HEAD"], cwd=repo_path, check=False)
-        return sha.strip() if sha.strip() else ""
-    except Exception:
-        return ""
-
-
 def check_remote_tag(repo_path: Path, tag: str) -> bool:
     """Check if tag exists on origin."""
     res = run_git(["ls-remote", "origin", "refs/tags/" + tag], cwd=repo_path, check=False)
     return bool(res)
+
+def check_pypi_version_exists(package_name: str, version: str) -> bool:
+    """Check if a specific version exists on PyPI."""
+    try:
+        import requests
+        ver = version.lstrip('v')
+        resp = requests.get(f"https://pypi.org/pypi/{package_name}/{ver}/json", timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def check_workflow_running(repo_path: Path, tag: str) -> tuple[bool, str]:
+    """
+    Check if the publish workflow is currently running or queued for this tag.
+    Returns (is_running, human_readable_status).
+    """
+    if not shutil.which("gh"):
+        return False, "gh not available"
+    try:
+        import json
+        res = subprocess.run(
+            ["gh", "run", "list", "--workflow=publish.yml",
+             "--json", "status,conclusion,headBranch,displayTitle,url",
+             "--limit", "10"],
+            cwd=repo_path, capture_output=True, text=True
+        )
+        if res.returncode != 0:
+            return False, "could not query runs"
+        for run in json.loads(res.stdout or "[]"):
+            status     = run.get("status", "")
+            conclusion = run.get("conclusion", "")
+            title      = run.get("displayTitle", "")
+            branch     = run.get("headBranch", "")
+            url        = run.get("url", "")
+            if tag in title or tag in branch:
+                if status in ("queued", "in_progress", "waiting", "requested"):
+                    return True, f"{status} — {url}"
+                if status == "completed":
+                    return False, f"completed ({conclusion}) — {url}"
+        return False, "no matching run found"
+    except Exception as e:
+        return False, f"error: {e}"
+
+
+def get_gh_release_info(repo_path: Path, tag: str) -> dict:
+    """
+    Fetch full info about an existing GitHub release for this tag.
+    Returns dict with keys: exists, is_draft, title, body.
+    """
+    empty = {"exists": False, "is_draft": False, "title": "", "body": ""}
+    if not shutil.which("gh"):
+        return empty
+    try:
+        import json
+        res = subprocess.run(
+            ["gh", "release", "view", tag,
+             "--json", "isDraft,name,body,url"],
+            cwd=repo_path, capture_output=True, text=True
+        )
+        if res.returncode != 0:
+            return empty
+        data = json.loads(res.stdout)
+        return {
+            "exists":   True,
+            "is_draft": data.get("isDraft", False),
+            "title":    data.get("name", ""),
+            "body":     data.get("body", ""),
+            "url":      data.get("url", ""),
+        }
+    except Exception:
+        return empty
+
 
 def get_repo_url(repo_path: Path) -> str:
     """Get the full GitHub repository URL (e.g. https://github.com/user/repo)."""
@@ -269,12 +326,7 @@ def get_smart_changelog(repo_path: Path, last_tag: str, new_version: str) -> tup
             print(f"{Colors.DIM}Falling back to basic changelog...{Colors.RESET}")
     
     # FALLBACK: Basic implementation
-    # When no tag exists yet, show all commits from root to HEAD
-    if last_tag:
-        range_str = f"{last_tag}..HEAD"
-    else:
-        first = get_first_commit_ref(repo_path)
-        range_str = f"{first}..HEAD" if first else "HEAD"
+    range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
     
     # Get file stats
     stats = ""
@@ -1652,7 +1704,7 @@ def _main_logic(repo_path: Path):
                         prev_tag = get_last_tag(repo_path)
                         
                         print("\n📊 Reviewing changes before regenerating changelog...")
-                        if not show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD"):
+                        if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
                             print("Skipping changelog regeneration.")
                         else:
                             print("\n🔄 Regenerating changelog from git history...")
@@ -1761,159 +1813,245 @@ def _main_logic(repo_path: Path):
             elif choice == '3':
                 sys.exit(0)
 
-    # Case 1.5: Missing GitHub Release (Post-Release Check)
-    # If we are sitting on a tag (current==last) but GH release is missing
+    # Case 1.5: Release exists (draft or full) but publish may have failed
+    # Covers: draft release, full release not on PyPI, workflow still running
     if current_ver == last_ver and last_tag_full and shutil.which("gh"):
-        # Quick check if release exists (suppress output)
-        res = subprocess.run(
-            ["gh", "release", "view", last_tag_full], 
-            cwd=repo_path, 
-            capture_output=True
-        )
-        
-        if res.returncode != 0: # Release does not exist
-            # Check if tag is on remote
-            tag_on_remote = check_remote_tag(repo_path, last_tag_full)
-            
-            if not tag_on_remote:
-                # Tag exists locally but NOT on remote!
-                print(f"\n⚠️  Tag {last_tag_full} exists LOCALLY but NOT on REMOTE!")
-                print(f"   Cannot create GitHub release without pushing tag first.")
-                print(f"\n🚀 Pushing tag to remote...")
-                
+
+        from . import pypi as _pypi
+        _pkg_name = _pypi.read_package_name(repo_path) or ""
+
+        # Gather full state in one pass
+        gh_release   = get_gh_release_info(repo_path, last_tag_full)
+        tag_on_remote = check_remote_tag(repo_path, last_tag_full)
+        on_pypi      = check_pypi_version_exists(_pkg_name, last_tag_full) if _pkg_name else False
+        wf_running, wf_status = check_workflow_running(repo_path, last_tag_full)
+
+        # ── Push local tag that never made it to remote ───────────────────────
+        if not tag_on_remote:
+            print(f"\n⚠️  Tag {last_tag_full} exists locally but NOT on remote.")
+            push_now = input("   Push it now? (y/n): ").strip().lower()
+            if push_now == 'y':
                 try:
                     run_git(["push", "origin", last_tag_full], cwd=repo_path)
-                    print(f"✓ Tag {last_tag_full} pushed to remote")
-                except:
-                    print(f"❌ Failed to push tag")
+                    tag_on_remote = True
+                    print(f"  ✓ Tag pushed")
+                except Exception:
+                    print("  ❌ Push failed — cannot continue")
                     return
-            
-            print(f"\n⚠️  Tag {last_tag_full} exists, but GitHub Release is MISSING.")
-            print(f"   (You are currently on {current_ver})")
-            
-            print("\nWhat would you like to do?")
-            print(f"  1. 📝 DRAFT Release Notes for {last_tag_full} (Auto-extract from CHANGELOG)")
-            print(f"  2. 🔄 DELETE TAG & START OVER (Delete local+remote tag, redo release)")
-            print(f"  3. ⏭️  START NEXT Release (Bump version)")
-            print(f"  4. 🚪 EXIT")
-            
-            choice = input("\nChoice (1-4): ").strip()
-            
-            if choice == '1':
-                print(f"\nExtracting notes for {current_ver} from CHANGELOG.md...")
-                notes = extract_changelog_section(repo_path, current_ver)
-                
-                if not notes:
-                    print("   ! No changelog found. Opening editor...")
-                    # FIX: Provide default title and unpack tuple
-                    is_first_release = current_ver.startswith('0.') or current_ver == '1.0.0'
-                    default_suffix = "Initial Release" if is_first_release else "Release"
-                    changelog_notes, github_notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
-                else:
-                    print(f"   ✓ Found {len(notes.splitlines())} lines of notes")
-                    # Extract title from first line of notes
-                    first_line = notes.strip().split('\n')[0] if notes else ""
-                    user_title = first_line if first_line and not first_line.startswith('**') else f"Release {current_ver}"
-                
-                if notes:
-                    # CHECK IF TAG EXISTS ON REMOTE FIRST!
-                    tag_on_remote = check_remote_tag(repo_path, last_tag_full)
-                    
-                    if not tag_on_remote:
-                        print(f"\n⚠️  Tag {last_tag_full} exists locally but NOT on remote!")
-                        push_choice = input("   Push tag to remote now? (y/n): ").strip().lower()
-                        
-                        if push_choice == 'y':
-                            print(f"   Pushing {last_tag_full} to remote...")
-                            try:
-                                run_git(["push", "origin", last_tag_full], cwd=repo_path)
-                                print(f"   ✓ Tag pushed to remote")
-                            except:
-                                print(f"   ❌ Failed to push tag")
-                                return
-                        else:
-                            print("   Cannot create GitHub release without remote tag")
-                            return
-                    
-                    # Create release
-                    print(f"   Drafting release on GitHub...")
-                    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf:
-                        tf.write(notes)
-                        notes_file = tf.name
-                    
-                    try:
-                        # Use a better title if possible
-                        release_title = f"Release {last_tag_full}"
-                        
-                        subprocess.run(
-                            ["gh", "release", "create", last_tag_full, "-F", notes_file, "-t", release_title, "--draft", "--target", "main"], 
-                            cwd=repo_path, 
-                            check=True
-                        )
-                        base_url = get_repo_url(repo_path)
-                        print(f"\n✅ Draft release created: {base_url}/releases/tag/{last_tag_full}")
-                        
-                        # --- FIX: Trigger PyPI setup here before looping back ---
-                        username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
-                        from . import pypi
-                        pypi.handle_pypi_publishing(
-                            repo_path=repo_path,
-                            version=last_tag_full,
-                            changelog=notes,
-                            username=username
-                        )
-                        # -------------------------------------------------------
+            else:
+                print("  Skipped — cannot create release without remote tag.")
+                return
 
-                    except subprocess.CalledProcessError:
-                        print(f"\n❌ Failed to create GH release. Ensure 'gh' is auth'd.")
-                    finally:
-                        if os.path.exists(notes_file): os.unlink(notes_file)
-                
-                # Loop back to refresh state
-                print("\n🔄 Refreshing state...")
-                return _main_logic(repo_path)
-                
+        # ── SCENARIO A: Draft release exists ─────────────────────────────────
+        if gh_release["exists"] and gh_release["is_draft"]:
+            print(f"\n📋 DRAFT RELEASE FOUND: {last_tag_full}")
+            print(f"   Title: {gh_release['title']}")
+            print(f"   URL:   {gh_release['url']}")
+            if on_pypi:
+                print(f"   ✅ Already on PyPI — you may just need to publish the draft.")
+            else:
+                print(f"   ⏳ Not yet on PyPI.")
+            if wf_running:
+                print(f"   ⚙️  Publish workflow is RUNNING — {wf_status}")
+
+            print("\nWhat would you like to do?")
+            print(f"  1. ✅ PUBLISH DRAFT as-is (trigger workflow by publishing on GitHub)")
+            print(f"  2. ✏️  EDIT NOTES then republish (reuse draft text as starting point)")
+            print(f"  3. 🆕 START FRESH (delete draft+tag, full re-release flow)")
+            print(f"  4. 🚪 EXIT")
+            choice = input("\nChoice (1-4): ").strip()
+
+            if choice == '1':
+                base_url = get_repo_url(repo_path)
+                print(f"\n→ Go publish the draft at: {base_url}/releases/tag/{last_tag_full}")
+                print(f"  Once published, the workflow will trigger and push to PyPI.")
+                return
+
             elif choice == '2':
+                # Pre-load draft body into editor
+                saved_notes = gh_release["body"]
+                saved_title = gh_release["title"] or f"Release {last_tag_full}"
+                print(f"\n✏️  Opening editor with existing draft notes...")
+                changelog_notes, github_notes, release_title = edit_notes(
+                    current_ver, saved_notes, saved_title, pkg_name=_pkg_name or repo_path.name
+                )
+                # Delete old draft and recreate with new notes
+                subprocess.run(["gh", "release", "delete", last_tag_full, "-y"],
+                               cwd=repo_path, check=False)
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.md', delete=False) as tf:
+                    tf.write(github_notes)
+                    notes_file = tf.name
+                try:
+                    subprocess.run(
+                        ["gh", "release", "create", last_tag_full,
+                         "-F", notes_file, "-t", release_title,
+                         "--draft", "--target", "main"],
+                        cwd=repo_path, check=True
+                    )
+                    base_url = get_repo_url(repo_path)
+                    print(f"\n✅ Updated draft: {base_url}/releases/tag/{last_tag_full}")
+                    write_changelog(repo_path, changelog_notes, current_ver)
+                except subprocess.CalledProcessError:
+                    print("❌ Failed to recreate draft.")
+                finally:
+                    if os.path.exists(notes_file): os.unlink(notes_file)
+                return
+
+            elif choice == '3':
+                # Fall through to FAILED PUBLISH cleanup below (shared logic)
+                gh_release["is_draft"] = False  # treat as full release for cleanup
+            else:
+                sys.exit(0)
+
+        # ── SCENARIO B: Full (non-draft) release exists but NOT on PyPI ───────
+        if gh_release["exists"] and not gh_release["is_draft"] and not on_pypi:
+
+            if wf_running:
+                print(f"\n⚙️  PUBLISH WORKFLOW IS STILL RUNNING for {last_tag_full}")
+                print(f"   Status: {wf_status}")
+                print(f"   Wait for it to finish before taking action.")
+                print(f"\n  1. Check again (refresh)")
+                print(f"  2. Proceed anyway (dangerous — may double-publish)")
+                print(f"  3. EXIT")
+                c = input("\nChoice (1-3): ").strip()
+                if c == '1':
+                    return _main_logic(repo_path)
+                elif c != '2':
+                    return
+
+            # Safe to act: full release exists, workflow done/absent, not on PyPI
+            print(f"\n🚨 FAILED PUBLISH DETECTED: {last_tag_full}")
+            print(f"   GitHub Release:  ✅ exists (published, not draft)")
+            print(f"   PyPI:            ❌ version not found")
+            print(f"   Workflow:        {'⚙️  running' if wf_running else '✅ not running'}")
+            print(f"\n   The release was published but the PyPI workflow failed or")
+            print(f"   never triggered. The release notes are saved below.")
+            print(f"\n   Saved title: {gh_release['title']}")
+            body_preview = (gh_release['body'] or '')[:300].strip()
+            if body_preview:
+                print(f"   Notes preview:\n{Colors.DIM}")
+                for line in body_preview.splitlines()[:8]:
+                    print(f"     {line}")
+                print(f"{Colors.RESET}")
+
+            print("\nWhat would you like to do?")
+            print(f"  1. 🔁 RE-RELEASE same version (delete release+tag, reuse saved notes, full flow)")
+            print(f"  2. ✏️  RE-RELEASE with edited notes (same but open editor first)")
+            print(f"  3. ⏭️  BUMP VERSION instead (treat this as done, start next release)")
+            print(f"  4. 🚪 EXIT")
+            choice = input("\nChoice (1-4): ").strip()
+
+            if choice in ('1', '2'):
+                # Save notes from the full release before deleting
+                saved_notes = gh_release["body"] or extract_changelog_section(repo_path, current_ver) or ""
+                saved_title = gh_release["title"] or f"Release {last_tag_full}"
                 tag = last_tag_full
-                print(f"\n🔄 Resetting release state for {tag}...")
-                
-                # 1. Delete remote tag
+
+                print(f"\n🗑️  Deleting failed release and tag...")
+                subprocess.run(["gh", "release", "delete", tag, "-y"],
+                               cwd=repo_path, check=False)
+                print(f"  ✓ Deleted GitHub release {tag}")
                 run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted remote tag {tag}")
-                
-                # 2. Delete local tag
                 run_git(["tag", "-d", tag], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted local tag {tag}")
-                
-                # 3. Get the ACTUAL previous tag now that the current one is gone
-                # This ensures the changelog covers the correct range (PrevTag..HEAD)
+
+                if choice == '2':
+                    print(f"\n✏️  Opening editor with saved release notes...")
+                    prev_tag = get_last_tag(repo_path)
+                    changelog_notes, github_notes, release_title = edit_notes(
+                        current_ver, saved_notes, saved_title,
+                        pkg_name=_pkg_name or repo_path.name
+                    )
+                else:
+                    # Reuse notes exactly as-is
+                    github_notes   = saved_notes
+                    changelog_notes = saved_notes
+                    release_title  = saved_title
+                    print(f"  ✓ Reusing saved notes: \"{release_title}\"")
+
+                write_changelog(repo_path, changelog_notes, current_ver)
+                perform_git_release(repo_path, current_ver, release_title, github_notes)
+                return
+
+            elif choice == '3':
+                # Fall through to version bump
+                pass
+            else:
+                sys.exit(0)
+
+        # ── SCENARIO C: No GH release at all ─────────────────────────────────
+        if not gh_release["exists"] and tag_on_remote:
+            print(f"\n⚠️  Tag {last_tag_full} is on remote but has NO GitHub release.")
+            print("\nWhat would you like to do?")
+            print(f"  1. 📝 CREATE draft release (auto-extract notes from CHANGELOG)")
+            print(f"  2. 🔄 DELETE TAG & start full re-release flow")
+            print(f"  3. ⏭️  BUMP VERSION (start next release)")
+            print(f"  4. 🚪 EXIT")
+            choice = input("\nChoice (1-4): ").strip()
+
+            if choice == '1':
+                notes = extract_changelog_section(repo_path, current_ver)
+                if not notes:
+                    is_first = current_ver.startswith('0.') or current_ver == '1.0.0'
+                    changelog_notes, notes, release_title = edit_notes(
+                        current_ver, "", "Initial Release" if is_first else "Release",
+                        pkg_name=_pkg_name or repo_path.name
+                    )
+                else:
+                    release_title = f"Release {last_tag_full}"
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.md', delete=False) as tf:
+                    tf.write(notes)
+                    notes_file = tf.name
+                try:
+                    subprocess.run(
+                        ["gh", "release", "create", last_tag_full,
+                         "-F", notes_file, "-t", release_title,
+                         "--draft", "--target", "main"],
+                        cwd=repo_path, check=True
+                    )
+                    base_url = get_repo_url(repo_path)
+                    print(f"\n✅ Draft created: {base_url}/releases/tag/{last_tag_full}")
+                    username = run_git(["config", "user.name"], cwd=repo_path, check=False) or "your-username"
+                    from . import pypi
+                    pypi.handle_pypi_publishing(
+                        repo_path=repo_path, version=last_tag_full,
+                        changelog=notes, username=username
+                    )
+                except subprocess.CalledProcessError:
+                    print("❌ Failed to create draft. Check gh auth.")
+                finally:
+                    if os.path.exists(notes_file): os.unlink(notes_file)
+                print("\n🔄 Refreshing state...")
+                return _main_logic(repo_path)
+
+            elif choice == '2':
+                tag = last_tag_full
+                run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted remote tag {tag}")
+                run_git(["tag", "-d", tag], cwd=repo_path, check=False)
+                print(f"  ✓ Deleted local tag {tag}")
                 prev_tag = get_last_tag(repo_path)
-                
                 print("\n📊 Reviewing changes before regenerating changelog...")
                 if not show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD"):
                     print("Release cancelled.")
                     return
-                
-                print("\nRegenerating changelog from git history...")
                 draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
-                
-                # 4. Let user review/edit notes (Standard flow)
-                changelog_notes, github_notes, release_title = edit_notes(current_ver, draft, suggested_title, pkg_name=repo_path.name)
-                
+                changelog_notes, github_notes, release_title = edit_notes(
+                    current_ver, draft, suggested_title, pkg_name=_pkg_name or repo_path.name
+                )
                 write_changelog(repo_path, changelog_notes, current_ver)
                 perform_git_release(repo_path, current_ver, release_title, github_notes)
                 return
-                
+
             elif choice == '3':
-                # Fall through to bump logic below
-                pass
-                
-            elif choice == '4':
-                sys.exit(0)
-            
-            elif choice.lower() == 'reset':  # ✅ CORRECT - part of elif chain
+                pass  # fall through to bump
+            elif choice.lower() == 'reset':
                 reset_version_to_tag(repo_path)
                 return
+            else:
+                sys.exit(0)
+
     # Case 2: Clean Slate (Normal Flow)
     print(f"Current Version: {current_ver}")
     print("\n[1] Patch  [2] Minor  [3] Major")
@@ -1941,7 +2079,7 @@ def _main_logic(repo_path: Path):
     
     # Show review before changelog
     print("\n📊 Reviewing changes before generating changelog...")
-    if not show_review_before_changelog(repo_path, last_tag_full or get_first_commit_ref(repo_path), "HEAD"):
+    if not show_review_before_changelog(repo_path, last_tag_full or "HEAD~10", "HEAD"):
         print("Release cancelled. Reverting pyproject.toml...")
         content = toml.read_text()
         toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{current_ver}"', content, count=1, flags=re.MULTILINE))
