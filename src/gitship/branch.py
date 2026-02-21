@@ -14,10 +14,31 @@ Provides intuitive branch operations including:
 
 import os
 import sys
+import signal
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
+
+
+class UserCancelled(Exception):
+    """Raised on Ctrl+C anywhere in the branch menu — gives a clean exit."""
+    pass
+
+
+def _sigint_handler(sig, frame):
+    raise UserCancelled()
+
+
+def safe_input(prompt: str = "") -> str:
+    """
+    Drop-in replacement for input() that raises UserCancelled on Ctrl+C
+    instead of letting KeyboardInterrupt propagate up as a traceback.
+    """
+    try:
+        return input(prompt)
+    except (KeyboardInterrupt, EOFError):
+        raise UserCancelled()
 
 try:
     from gitship.gitops import stash_ignored_changes, restore_latest_stash, atomic_git_operation
@@ -168,7 +189,7 @@ def switch_branch(repo_path: Path, branch_name: str) -> bool:
             print("  3. Force switch (discard changes - DANGER!)")
             print("  4. Cancel")
             
-            choice = input("\nChoice (1-4): ").strip()
+            choice = safe_input("\nChoice (1-4): ").strip()
             
             if choice == '1':
                 # Stash and switch
@@ -198,7 +219,7 @@ def switch_branch(repo_path: Path, branch_name: str) -> bool:
             
             elif choice == '3':
                 print(f"\n{Colors.RED}⚠️  WARNING: This will DISCARD all your uncommitted changes!{Colors.RESET}")
-                confirm = input("Type 'yes' to confirm: ").strip().lower()
+                confirm = safe_input("Type 'yes' to confirm: ").strip().lower()
                 if confirm == 'yes':
                     force_result = run_git(["checkout", "-f", branch_name], repo_path)
                     if force_result.returncode == 0:
@@ -219,6 +240,87 @@ def switch_branch(repo_path: Path, branch_name: str) -> bool:
             # Some other error
             print(f"{Colors.RED}✗ Failed to switch branch: {error_msg}{Colors.RESET}")
             return False
+
+def confirm_and_delete_branch(repo_path: Path, branch_name: str, current_branch: str, context: str = "") -> bool:
+    """
+    Two-step confirmed branch deletion used by all delete paths.
+    
+    Step 1: Show what will be deleted (local + remote status) and ask y/n.
+    Step 2: Require typing the branch name to confirm — prevents accidental deletes.
+    
+    Returns True if deleted, False if cancelled or failed.
+    """
+    # Check remote existence
+    remote_check = run_git(["ls-remote", "--heads", "origin", branch_name], repo_path, check=False)
+    has_remote = bool(remote_check.stdout.strip())
+    
+    # Check for unmerged commits
+    unmerged = run_git(["log", "--oneline", f"HEAD..{branch_name}"], repo_path)
+    unmerged_count = len([l for l in unmerged.stdout.strip().split('\n') if l])
+    
+    print(f"\n{Colors.BOLD}{'='*50}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.RED}⚠️  BRANCH DELETION{Colors.RESET}")
+    print(f"{Colors.BOLD}{'='*50}{Colors.RESET}")
+    if context:
+        print(f"{Colors.DIM}{context}{Colors.RESET}")
+    print(f"\n  Branch : {Colors.CYAN}{branch_name}{Colors.RESET}")
+    print(f"  Local  : {Colors.RED}will be deleted{Colors.RESET}")
+    if has_remote:
+        print(f"  Remote : {Colors.RED}origin/{branch_name} will also be deleted{Colors.RESET}")
+    else:
+        print(f"  Remote : {Colors.DIM}not on remote{Colors.RESET}")
+    if unmerged_count:
+        print(f"\n  {Colors.YELLOW}⚠️  {unmerged_count} commit(s) in this branch are NOT in the current branch.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}   These will be permanently lost if you delete.{Colors.RESET}")
+    print()
+    
+    # Step 1: initial y/n
+    try:
+        step1 = safe_input(f"{Colors.YELLOW}Delete branch '{branch_name}'? (y/n):{Colors.RESET} ").strip().lower()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        print("\nCancelled.")
+        return False
+    
+    if step1 != 'y':
+        print(f"{Colors.GREEN}Branch kept.{Colors.RESET}")
+        return False
+    
+    # Step 2: type the name to confirm
+    print(f"\n{Colors.BOLD}Confirm by typing the branch name exactly:{Colors.RESET}")
+    try:
+        typed = safe_input(f"Branch name: ").strip()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        print("\nCancelled.")
+        return False
+    
+    if typed != branch_name:
+        print(f"{Colors.RED}✗ Name didn't match. Branch NOT deleted.{Colors.RESET}")
+        return False
+    
+    # Safety: can't delete current branch
+    if branch_name == current_branch:
+        print(f"{Colors.RED}✗ Cannot delete the currently checked-out branch.{Colors.RESET}")
+        return False
+    
+    # Execute local delete (-d first, escalate to -D only if unmerged and user confirmed)
+    flag = "-D" if unmerged_count else "-d"
+    res = run_git(["branch", flag, branch_name], repo_path)
+    if res.returncode != 0:
+        print(f"{Colors.RED}✗ Failed to delete local branch: {res.stderr.strip()}{Colors.RESET}")
+        return False
+    print(f"{Colors.GREEN}✓ Deleted local branch '{branch_name}'{Colors.RESET}")
+    
+    # Delete remote if present
+    if has_remote:
+        push_res = run_git(["push", "origin", "--delete", branch_name], repo_path)
+        if push_res.returncode == 0:
+            print(f"{Colors.GREEN}✓ Deleted remote branch 'origin/{branch_name}'{Colors.RESET}")
+        else:
+            print(f"{Colors.YELLOW}⚠️  Remote delete failed: {push_res.stderr.strip()}{Colors.RESET}")
+            print(f"{Colors.DIM}   Run manually: git push origin --delete {branch_name}{Colors.RESET}")
+    
+    return True
+
 
 def verify_and_offer_delete(repo_path: Path, source: str, target: str):
     """
@@ -281,25 +383,11 @@ def verify_and_offer_delete(repo_path: Path, source: str, target: str):
         
         print(f"\n{Colors.GREEN}✅ All changed files match exactly in {target}.{Colors.RESET}")
 
-    # Offer delete
+    # Offer delete using two-step confirmation
     print(f"\n{Colors.BOLD}Branch Cleanup:{Colors.RESET}")
     print(f"The branch '{Colors.CYAN}{source}{Colors.RESET}' appears fully synced/redundant.")
-    choice = input(f"{Colors.YELLOW}Delete branch '{source}'? (y/n):{Colors.RESET} ").strip().lower()
-    
-    if choice == 'y':
-        # Safety: ensure we aren't deleting current branch (we should be on target)
-        current = get_current_branch(repo_path)
-        if current == source:
-            print(f"{Colors.RED}✗ Cannot delete current branch. Switch to {target} first.{Colors.RESET}")
-            return
-
-        res = run_git(["branch", "-D", source], repo_path)
-        if res.returncode == 0:
-            print(f"{Colors.GREEN}✓ Deleted branch {source}{Colors.RESET}")
-        else:
-            print(f"{Colors.RED}✗ Failed to delete: {res.stderr.strip()}{Colors.RESET}")
-    else:
-        print("Branch kept.")
+    current = get_current_branch(repo_path)
+    confirm_and_delete_branch(repo_path, source, current, context=f"All changes from '{source}' are present in '{target}'.")
 
 def rename_branch(repo_path: Path, old_name: str, new_name: str, update_remote: bool = False) -> bool:
     """Rename a branch locally and optionally on remote using atomic operations."""
@@ -443,7 +531,7 @@ def ensure_clean_git_state(repo_path: Path) -> bool:
             print(f"\n{Colors.RED}⚠️  Repository is in the middle of a {name}!{Colors.RESET}")
             print(f"   This prevents switching branches or starting new merges.")
             
-            choice = input(f"\n{Colors.YELLOW}Abort the stuck {name} and reset to clean state? (y/n):{Colors.RESET} ").strip().lower()
+            choice = safe_input(f"\n{Colors.YELLOW}Abort the stuck {name} and reset to clean state? (y/n):{Colors.RESET} ").strip().lower()
             if choice == 'y':
                 res = run_git(abort_cmd, repo_path)
                 if res.returncode == 0:
@@ -515,7 +603,7 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
   {Colors.DIM}0. Cancel{Colors.RESET}
 """)
 
-    choice = input(f"{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
+    choice = safe_input(f"{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
 
     if choice == "0":
         print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
@@ -529,7 +617,7 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
         print(f"    2. Rebase it onto {Colors.CYAN}{target}{Colors.RESET}")
         print(f"    3. Switch to {Colors.CYAN}{target}{Colors.RESET} and fast-forward merge")
         print(f"\n  {Colors.YELLOW}Note: rewrites {source} commit SHAs (normal for rebase){Colors.RESET}")
-        confirm = input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
+        confirm = safe_input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
         if confirm != 'y':
             print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
             return
@@ -551,10 +639,10 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
         if res.returncode != 0:
             print(f"{Colors.RED}✗ Rebase failed:{Colors.RESET}")
             print(f"  {res.stderr.strip() or res.stdout.strip()}")
-            print(f"\n  {Colors.YELLOW}To abort the rebase and return to original state:{Colors.RESET}")
-            print(f"    git rebase --abort")
+            run_git(["rebase", "--abort"], repo_path)
+            print(f"  Rebase aborted — branch restored to original state.")
             if stashed:
-                print(f"\n  {Colors.MAGENTA}📦 Your stash is still saved. Run 'git stash pop' after aborting.{Colors.RESET}")
+                restore_latest_stash(repo_path)
             return
 
         # Fast-forward target
@@ -577,7 +665,7 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
         print(f"\n{Colors.BOLD}🔀 FORCE MERGE: {source} → {target} (unrelated histories){Colors.RESET}")
         print(f"  {Colors.YELLOW}This joins two independent trees into one with a merge commit.{Colors.RESET}")
         print(f"  Both histories will be preserved.")
-        confirm = input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
+        confirm = safe_input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
         if confirm != 'y':
             print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
             return
@@ -621,7 +709,7 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
     elif choice == "3":
         # Push source as separate branch, show PR link
         print(f"\n{Colors.BOLD}🚀 PUSH {source} → remote as separate branch{Colors.RESET}")
-        confirm = input(f"  Push '{source}' to origin/{source}? (y/n): ").strip().lower()
+        confirm = safe_input(f"  Push '{source}' to origin/{source}? (y/n): ").strip().lower()
         if confirm != 'y':
             print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
             return
@@ -646,7 +734,7 @@ def handle_unrelated_histories(repo_path: Path, source: str, target: str):
 
 def _offer_push_after_unrelated(repo_path: Path, target: str, source: str):
     """After a successful unrelated-history resolution, offer to push and clean up."""
-    push = input(f"\n{Colors.CYAN}🚀 Push {target} to remote now? (y/n):{Colors.RESET} ").strip().lower()
+    push = safe_input(f"\n{Colors.CYAN}🚀 Push {target} to remote now? (y/n):{Colors.RESET} ").strip().lower()
     if push == 'y':
         res = run_git(["push", "origin", target], repo_path)
         if res.returncode == 0:
@@ -655,7 +743,7 @@ def _offer_push_after_unrelated(repo_path: Path, target: str, source: str):
             print(f"{Colors.RED}✗ Push failed: {res.stderr.strip()}{Colors.RESET}")
 
     # Offer to delete the now-redundant source branch
-    delete = input(f"\n  Delete local branch '{source}' now? (y/n): ").strip().lower()
+    delete = safe_input(f"\n  Delete local branch '{source}' now? (y/n): ").strip().lower()
     if delete == 'y':
         current = get_current_branch(repo_path)
         if current == source:
@@ -696,99 +784,450 @@ def _github_pr_url(remote_url: str, source: str, target: str) -> str:
 # SIMPLE COMPARISON & MERGE LOGIC
 # =============================================================================
 
+
+# =============================================================================
+# MERGE CACHE  (self-contained — no import from merge.py to avoid circular deps)
+# Writes to the same .gitship/merge-cache directory that merge.py uses,
+# so both modules interoperate on the same on-disk state.
+# =============================================================================
+
+def _merge_cache_dir(repo_path: Path) -> Path:
+    """Return (and create) .gitship/merge-cache."""
+    d = repo_path / ".gitship" / "merge-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_merge_cache(repo_path: Path, source: str, target: str) -> list:
+    """
+    Copy all currently-staged files to the merge cache so a future session
+    can restore partial conflict resolutions.  Returns list of saved paths.
+    """
+    import shutil
+    cache_dir = _merge_cache_dir(repo_path)
+
+    (cache_dir / "merge-meta.txt").write_text(
+        f"source={source}\ntarget={target}\n", encoding="utf-8"
+    )
+
+    staged = run_git(["diff", "--cached", "--name-only"], repo_path)
+    files = [f.strip() for f in staged.stdout.strip().splitlines() if f.strip()]
+
+    saved = []
+    for filepath in files:
+        src = repo_path / filepath
+        if src.exists():
+            dst = cache_dir / filepath
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            saved.append(filepath)
+
+    if saved:
+        (cache_dir / "resolved-files.txt").write_text(
+            "\n".join(saved), encoding="utf-8"
+        )
+        print(f"{Colors.DIM}💾 Saved {len(saved)} resolved file(s) to merge cache{Colors.RESET}")
+
+    return saved
+
+
+def _clear_merge_cache(repo_path: Path):
+    """Remove the merge cache directory after a successful merge."""
+    import shutil
+    cache_dir = repo_path / ".gitship" / "merge-cache"
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+
+
+def _has_merge_cache(repo_path: Path) -> bool:
+    """Return True if a non-empty merge cache exists."""
+    meta = repo_path / ".gitship" / "merge-cache" / "merge-meta.txt"
+    return meta.exists()
+
+
+def _fetch_remote_quietly(repo_path: Path, remote: str = "origin") -> bool:
+    """Fetch from remote silently. Returns True on success, False if offline/no remote."""
+    res = run_git(["fetch", remote, "--prune"], repo_path)
+    return res.returncode == 0
+
+
+def _remote_branch_exists(repo_path: Path, branch: str, remote: str = "origin") -> bool:
+    """Return True if origin/<branch> exists locally (after fetch)."""
+    res = run_git(["rev-parse", "--verify", f"refs/remotes/{remote}/{branch}"], repo_path)
+    return res.returncode == 0
+
+
+def _branch_divergence(repo_path: Path, branch: str, remote: str = "origin"):
+    """
+    Return (ahead, behind) counts of local branch vs origin/branch.
+    Returns (0, 0) if no remote tracking exists.
+    """
+    if not _remote_branch_exists(repo_path, branch, remote):
+        return (0, 0)
+    res = run_git(
+        ["rev-list", "--left-right", "--count", f"{remote}/{branch}...{branch}"],
+        repo_path
+    )
+    if res.returncode != 0:
+        return (0, 0)
+    parts = res.stdout.strip().split()
+    if len(parts) == 2:
+        return (int(parts[1]), int(parts[0]))  # (local_ahead, local_behind)
+    return (0, 0)
+
+
+def _sync_branch_with_remote(repo_path: Path, branch: str, remote: str = "origin") -> bool:
+    """
+    Rebase local branch on top of its remote counterpart.
+    If conflicts arise, invokes gitship's resolver when available.
+    Returns True if the branch is clean and synced, False on failure.
+    """
+    if not _remote_branch_exists(repo_path, branch, remote):
+        return True  # nothing to sync against
+
+    ahead, behind = _branch_divergence(repo_path, branch, remote)
+    if behind == 0:
+        return True  # already up to date
+
+    print(f"   Rebasing '{branch}' onto {remote}/{branch} ({behind} new commit(s) from remote)...")
+    res = run_git(["rebase", f"{remote}/{branch}"], repo_path)
+    if res.returncode == 0:
+        print(f"{Colors.GREEN}   ✓ Synced '{branch}' with {remote}/{branch}{Colors.RESET}")
+        return True
+
+    # Rebase hit conflicts
+    conflict_files = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip().splitlines()
+    print(f"\n{Colors.RED}   Rebase conflict in {len(conflict_files)} file(s):{Colors.RESET}")
+    for f in conflict_files:
+        print(f"     {Colors.RED}✗{Colors.RESET} {f}")
+
+    resolved = False
+    try:
+        from gitship.resolve import run_conflict_resolver
+        print(f"\n{Colors.CYAN}   Launching conflict resolver...{Colors.RESET}")
+        run_conflict_resolver(repo_path)
+        remaining = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip()
+        if not remaining:
+            res2 = run_git(["rebase", "--continue"], repo_path)
+            if res2.returncode == 0:
+                print(f"{Colors.GREEN}   ✓ Rebase completed after resolution.{Colors.RESET}")
+                resolved = True
+    except ImportError:
+        pass
+
+    if not resolved:
+        print(f"\n  Options:")
+        print(f"  1. Keep remote version for all conflicts and continue")
+        print(f"  2. Abort rebase (branch left unchanged)")
+        choice = safe_input(f"\n  Choice (1-2): ").strip()
+        if choice == '1':
+            for f in conflict_files:
+                run_git(["checkout", "--theirs", f], repo_path)
+                run_git(["add", f], repo_path)
+            res2 = run_git(["rebase", "--continue"], repo_path)
+            if res2.returncode == 0:
+                print(f"{Colors.GREEN}   ✓ Rebase completed (remote versions kept){Colors.RESET}")
+                return True
+        run_git(["rebase", "--abort"], repo_path)
+        print(f"{Colors.YELLOW}   Rebase aborted. Branch unchanged.{Colors.RESET}")
+        return False
+
+    return resolved
+
+
+def smart_push_branch(repo_path: Path, branch: str, remote: str = "origin") -> bool:
+    """
+    Push branch to remote, handling all common rejection scenarios:
+      - Remote ahead (fetch first) → rebase then push
+      - Diverged → offer rebase or force-with-lease
+      - Protected branch → show PR link
+      - No upstream → push -u
+    Returns True on success.
+    """
+    # Ensure we have fresh remote state
+    _fetch_remote_quietly(repo_path, remote)
+    ahead, behind = _branch_divergence(repo_path, branch, remote)
+
+    force_with_lease = False
+
+    if behind > 0 and ahead > 0:
+        # Diverged — need user decision
+        print(f"\n{Colors.YELLOW}⚠  '{branch}' has diverged from {remote}/{branch}:{Colors.RESET}")
+        print(f"   Local is {ahead} ahead and {behind} behind the remote.")
+        print(f"\n   1. Rebase local on remote, then push  (recommended — keeps linear history)")
+        print(f"   2. Force push with lease  (overwrites remote — only if you're certain)")
+        print(f"   3. Cancel")
+        choice = safe_input(f"\nChoice (1-3): ").strip()
+        if choice == '1':
+            if not _sync_branch_with_remote(repo_path, branch, remote):
+                return False
+        elif choice == '2':
+            force_with_lease = True
+        else:
+            print(f"{Colors.YELLOW}Push cancelled.{Colors.RESET}")
+            return False
+    elif behind > 0:
+        # Remote simply has new commits — safe auto-rebase
+        if not _sync_branch_with_remote(repo_path, branch, remote):
+            return False
+
+    # Build push args
+    if force_with_lease:
+        push_args = ["push", "--force-with-lease", remote, branch]
+    elif not _remote_branch_exists(repo_path, branch, remote):
+        push_args = ["push", "-u", remote, branch]
+    else:
+        push_args = ["push", remote, branch]
+
+    res = run_git(push_args, repo_path)
+
+    if res.returncode == 0:
+        print(f"{Colors.GREEN}✓ Pushed '{branch}' → {remote}/{branch}{Colors.RESET}")
+        # Surface any security notices from GitHub without the noise
+        for line in res.stderr.splitlines():
+            if "vulnerabilit" in line.lower() or "security" in line.lower():
+                print(f"  {Colors.YELLOW}⚠  {line.strip()}{Colors.RESET}")
+        return True
+
+    # Push failed — explain clearly
+    err = res.stderr.strip()
+    print(f"\n{Colors.RED}✗ Push failed.{Colors.RESET}")
+    if "protected" in err or "pull request" in err.lower() or "Cannot update this protected" in err:
+        print(f"  {Colors.YELLOW}🔒 Branch '{branch}' is protected on {remote}.{Colors.RESET}")
+        print(f"     Direct pushes are blocked — you need to open a Pull Request.")
+        remote_url = run_git(["remote", "get-url", remote], repo_path).stdout.strip()
+        default = get_default_branch(repo_path) or "main"
+        pr_url = _github_pr_url(remote_url, branch, default)
+        if pr_url:
+            print(f"\n  {Colors.BRIGHT_BLUE}Open PR: {pr_url}{Colors.RESET}")
+    elif "fetch first" in err or "non-fast-forward" in err:
+        print(f"  Remote still has commits that aren't local. Try the merge again.")
+    else:
+        print(f"  {err}")
+    return False
+
+
 def merge_branches_interactive(repo_path: Path, source: str, target: str):
-    """Merge source into target interactively."""
+    """
+    Merge source into target interactively.
+
+    Smart remote handling:
+    - Fetches remote state before doing anything
+    - Syncs target with its remote BEFORE merging (prevents push rejection)
+    - Uses smart_push_branch which auto-rebases if remote moved between merge and push
+    - Conflict handling during merge: save cache, launch resolver, commit on resolution
+    - On success: clear merge cache, restore stash, offer branch cleanup, smart push
+    - Stash is ALWAYS restored/cleaned — no leaks
+    """
     print(f"\n{Colors.BOLD}🔀 MERGE: {Colors.CYAN}{source}{Colors.RESET} → {Colors.CYAN}{target}{Colors.RESET}")
-    print(f"⚠️  This will:")
-    print(f"   1. Stash ignorable background changes (atomic)")
-    print(f"   2. Check out '{target}'")
-    print(f"   3. Merge '{source}' into it")
-    
-    confirm = input(f"\n{Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
-    if confirm != 'y':
-        print("Cancelled")
-        return
-    
-    # Detect unrelated histories before doing anything destructive
+
+    # ── Unrelated histories check ─────────────────────────────────────────────
     if not has_common_ancestor(repo_path, source, target):
-        print(f"\n{Colors.YELLOW}⚠️  Cannot proceed: {source} and {target} have no common ancestor.{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}⚠️  Cannot proceed: '{source}' and '{target}' have no common ancestor.{Colors.RESET}")
         print(f"   Switching to unrelated-histories handler...\n")
         handle_unrelated_histories(repo_path, source=source, target=target)
         return
 
-    # 0. Atomic Stash
+    # ── Fetch so divergence info is accurate ─────────────────────────────────
+    print(f"{Colors.DIM}Fetching latest remote state...{Colors.RESET}")
+    _fetch_remote_quietly(repo_path)
+
+    tgt_ahead, tgt_behind = _branch_divergence(repo_path, target)
+
+    # ── Show what we're about to do ───────────────────────────────────────────
+    print(f"\n  Source : {Colors.CYAN}{source}{Colors.RESET}")
+    print(f"  Target : {Colors.CYAN}{target}{Colors.RESET}", end="")
+    if tgt_behind:
+        print(f"  {Colors.YELLOW}(⚠ {tgt_behind} commit(s) behind remote — will sync first){Colors.RESET}", end="")
+    print()
+
+    print(f"\nSteps:")
+    if tgt_behind:
+        print(f"  1. Sync '{target}' with its remote")
+        print(f"  2. Merge '{source}' into '{target}'")
+        print(f"  3. Push updated '{target}' (optional)")
+    else:
+        print(f"  1. Merge '{source}' into '{target}'")
+        print(f"  2. Push updated '{target}' (optional)")
+
+    confirm = safe_input(f"\n{Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
+    if confirm != 'y':
+        print("Cancelled")
+        return
+
+    # ── Stash background noise ────────────────────────────────────────────────
     stashed = stash_ignored_changes(repo_path, f"Before merge {source} into {target}")
 
-    # 1. Switch
-    print(f"\n{Colors.DIM}[1/2] Switching to {target}...{Colors.RESET}")
+    # ── Switch to target ──────────────────────────────────────────────────────
+    print(f"\n{Colors.DIM}Switching to '{target}'...{Colors.RESET}")
     res_checkout = run_git(["checkout", target], repo_path)
     if res_checkout.returncode != 0:
-        print(f"{Colors.RED}❌ Failed to switch branches: {res_checkout.stderr.strip()}{Colors.RESET}")
+        print(f"{Colors.RED}❌ Failed to switch to '{target}': {res_checkout.stderr.strip()}{Colors.RESET}")
         if stashed:
-            print(f"{Colors.YELLOW}⚠️  Stash kept. Restoring now...{Colors.RESET}")
             restore_latest_stash(repo_path)
         return
-    
-    # 2. Merge with detailed message
-    print(f"{Colors.DIM}[2/2] Merging {source}...{Colors.RESET}")
-    
-    # Generate detailed merge message
+
+    # ── Sync target with remote BEFORE merging ────────────────────────────────
+    if tgt_behind > 0:
+        print(f"{Colors.DIM}Syncing '{target}' with remote ({tgt_behind} behind)...{Colors.RESET}")
+        if not _sync_branch_with_remote(repo_path, target):
+            print(f"{Colors.RED}❌ Could not sync '{target}' with remote. Aborting to prevent conflicts.{Colors.RESET}")
+            run_git(["checkout", "-"], repo_path)
+            if stashed:
+                restore_latest_stash(repo_path)
+            return
+
+    # ── Capture pre-merge HEAD so generate_merge_message has the right base ─────
+    pre_merge_head = run_git(["rev-parse", "HEAD"], repo_path).stdout.strip()
+
+    # ── Merge source into target (no-commit so we can review the message) ───────
+    print(f"{Colors.DIM}Merging '{source}' into '{target}'...{Colors.RESET}")
+
+    res_merge = run_git(["merge", "--no-ff", "--no-commit", source], repo_path, check=False)
+
+    # --no-commit leaves us in one of four states:
+    #   a) clean staged merge ready to commit            (returncode 0)
+    #   b) "Already up to date." — nothing to merge      (returncode 1, stdout contains message)
+    #   c) conflicts need resolving                      (returncode 1, conflict markers present)
+    #   d) unexpected hard failure                       (returncode != 0, nothing staged)
+
+    merge_out = res_merge.stdout.strip()
+    merge_err = res_merge.stderr.strip()
+
+    # State b: already merged — nothing to do
+    if "Already up to date" in merge_out or "Already up to date" in merge_err:
+        print(f"\n{Colors.YELLOW}ℹ  Already up to date — nothing to merge.{Colors.RESET}")
+        if stashed:
+            restore_latest_stash(repo_path)
+        return
+
+    has_conflicts = bool(
+        run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip()
+    )
+    has_staged = bool(
+        run_git(["diff", "--cached", "--name-only"], repo_path).stdout.strip()
+    )
+
+    if res_merge.returncode != 0 and has_conflicts:
+        # ── State c: Conflict ─────────────────────────────────────────────────
+        conflict_files = run_git(
+            ["diff", "--name-only", "--diff-filter=U"], repo_path
+        ).stdout.strip().splitlines()
+        print(f"\n{Colors.RED}❌ Merge has {len(conflict_files)} conflicted file(s):{Colors.RESET}")
+        for f in conflict_files:
+            print(f"   {Colors.RED}✗{Colors.RESET} {f}")
+
+        # Save cache immediately so nothing is lost if the process exits
+        _save_merge_cache(repo_path, source, target)
+
+        # Restore stash NOW so the resolver works with a clean tree
+        if stashed:
+            restore_latest_stash(repo_path)
+            stashed = False
+
+        resolved = False
+        try:
+            from gitship.resolve import run_conflict_resolver
+            print(f"\n{Colors.CYAN}Launching interactive conflict resolver...{Colors.RESET}")
+            run_conflict_resolver(repo_path)
+            remaining = run_git(
+                ["diff", "--name-only", "--diff-filter=U"], repo_path
+            ).stdout.strip()
+            if remaining:
+                _save_merge_cache(repo_path, source, target)
+                print(f"{Colors.YELLOW}⚠  {len(remaining.splitlines())} conflict(s) still unresolved.{Colors.RESET}")
+            else:
+                resolved = True  # fall through to commit+message prompt below
+        except ImportError:
+            pass
+
+        if not resolved:
+            print(f"\n{Colors.YELLOW}Run 'gitship merge' when ready to finish resolving.{Colors.RESET}")
+            print(f"{Colors.DIM}   Progress is saved — partial resolutions won't be lost.{Colors.RESET}")
+            return
+
+    elif res_merge.returncode != 0 and not has_conflicts and not has_staged:
+        # ── State d: Hard failure — show everything git said ──────────────────
+        print(f"\n{Colors.RED}❌ Merge failed.{Colors.RESET}")
+        if merge_out:
+            print(f"   stdout: {merge_out}")
+        if merge_err:
+            print(f"   stderr: {merge_err}")
+        if stashed:
+            restore_latest_stash(repo_path)
+        return
+
+    # ── States a/c-resolved: merge is staged, ready to commit ─────────────────
+    print(f"\n{Colors.GREEN}✅ Merge staged successfully.{Colors.RESET}")
+
+    commit_msg = None
     try:
         from gitship.merge_message import generate_merge_message
-        
-        # Get the merge base to use as base_ref
-        merge_base_result = run_git(["merge-base", target, source], repo_path, check=False)
-        if merge_base_result.returncode == 0:
-            base_ref = merge_base_result.stdout.strip()
-        else:
-            base_ref = target
-        
-        merge_msg = generate_merge_message(
-            repo_path=repo_path,
-            base_ref=base_ref,
-            head_ref=source
+        # Use pre_merge_head as base so the message covers exactly the incoming commits
+        commit_msg = generate_merge_message(
+            repo_path=repo_path, base_ref=pre_merge_head, head_ref=source
         )
-        
-        # Perform merge with custom message
-        res_merge = run_git(["merge", "--no-ff", "-m", merge_msg, source], repo_path, check=False)
+
+        print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}PROPOSED MERGE COMMIT MESSAGE:{Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(commit_msg)
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+
+        msg_choice = safe_input(
+            f"\n{Colors.CYAN}Use this message? (y / e to edit / n for default):{Colors.RESET} "
+        ).strip().lower()
+
+        if msg_choice == 'e':
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+                tf.write(commit_msg)
+                tmp_path = tf.name
+            editor = (os.environ.get('GIT_EDITOR') or os.environ.get('VISUAL')
+                      or os.environ.get('EDITOR', 'nano'))
+            __import__('subprocess').run([editor, tmp_path])
+            commit_msg = open(tmp_path, encoding='utf-8').read().strip()
+            os.unlink(tmp_path)
+            print(f"{Colors.GREEN}✓ Using edited message.{Colors.RESET}")
+        elif msg_choice != 'y':
+            commit_msg = None  # use git's default MERGE_MSG
     except ImportError:
-        # Fallback to default merge if merge_message not available
-        res_merge = run_git(["merge", source], repo_path, check=False)
-    
-    if res_merge.returncode != 0:
-        print(f"\n{Colors.RED}❌ Merge failed with conflicts.{Colors.RESET}")
-        print(f"   Git output: {res_merge.stdout} {res_merge.stderr}")
-        print(f"\n{Colors.YELLOW}ACTION REQUIRED:{Colors.RESET}")
-        print(f"   1. Open files with conflicts")
-        print(f"   2. Fix them")
-        print(f"   3. Run: git add .")
-        print(f"   4. Run: git commit")
-        if stashed:
-            print(f"\n{Colors.MAGENTA}📦 Note: Ignorable files are stashed. Run 'git stash pop' AFTER you finish the merge.{Colors.RESET}")
-        return
+        pass  # no merge_message module — use git default
+
+    # ── Commit ────────────────────────────────────────────────────────────────
+    if commit_msg:
+        res_commit = run_git(["commit", "-m", commit_msg], repo_path)
     else:
-        print(f"\n{Colors.GREEN}✅ Merge successful!{Colors.RESET}")
-        
-        # Restore stash if success
+        res_commit = run_git(["commit", "--no-edit"], repo_path)
+
+    if res_commit.returncode != 0:
+        # Show everything — stdout often has the real reason (e.g. "nothing to commit")
+        out = res_commit.stdout.strip()
+        err = res_commit.stderr.strip()
+        print(f"\n{Colors.RED}❌ Commit failed.{Colors.RESET}")
+        if out:
+            print(f"   {out}")
+        if err:
+            print(f"   {err}")
+        print(f"   Run 'gitship merge' to retry.")
         if stashed:
             restore_latest_stash(repo_path)
-            
-        # Verify and Cleanup
-        verify_and_offer_delete(repo_path, source, target)
-        
-        # 3. Optional Push
-        do_push = input(f"\n{Colors.CYAN}🚀 Push updated {target} to remote? (y/n):{Colors.RESET} ").strip().lower()
-        if do_push == 'y':
-            print(f"{Colors.DIM}Pushing...{Colors.RESET}")
-            res_push = atomic_git_operation(
-                repo_path=repo_path,
-                git_command=["push", "origin", target],
-                description=f"push {target} after merge"
-            )
-            if res_push.returncode == 0:
-                print(f"{Colors.GREEN}✓ Pushed to origin/{target}{Colors.RESET}")
-            else:
-                print(f"{Colors.RED}✗ Push failed: {res_push.stderr.strip()}{Colors.RESET}")
+        return
+
+    print(f"{Colors.GREEN}✅ Merge committed.{Colors.RESET}")
+    _clear_merge_cache(repo_path)
+
+    # ── Restore stash (if not already restored above) ─────────────────────────
+    if stashed:
+        restore_latest_stash(repo_path)
+
+    # ── Cleanup: offer to delete now-redundant source branch ─────────────────
+    verify_and_offer_delete(repo_path, source, target)
+
+    # ── Push (smart — handles remote having moved) ────────────────────────────
+    do_push = safe_input(f"\n{Colors.CYAN}🚀 Push updated '{target}' to remote? (y/n):{Colors.RESET} ").strip().lower()
+    if do_push == 'y':
+        smart_push_branch(repo_path, target)
 
 
 def export_comparison(repo_path: Path, branch1: str, branch2: str, commits_1: List[str], commits_2: List[str]):
@@ -832,6 +1271,220 @@ def export_comparison(repo_path: Path, branch1: str, branch2: str, commits_1: Li
     print(f"{Colors.GREEN}✅ Exported to: {filepath}{Colors.RESET}")
 
 
+def _offer_cherry_pick_commit_amend(repo_path: Path, source: str, target: str):
+    """
+    After a successful cherry-pick, offer to amend the HEAD commit message
+    with a detailed summary generated by merge_message + user input.
+    
+    Cherry-pick auto-commits using the original commit's message, which is
+    usually a single terse line. This gives the user a chance to replace it
+    with a rich message showing file stats, categorized changes, and their
+    own context — the same quality as a full merge commit message.
+    """
+    print(f"\n{Colors.BOLD}📝 Commit Message{Colors.RESET}")
+    print(f"The cherry-pick was committed with the original message.")
+    print(f"  1. Amend with detailed stats + your notes  {Colors.DIM}(recommended){Colors.RESET}")
+    print(f"  2. Keep original message as-is")
+    
+    try:
+        choice = safe_input(f"\n{Colors.CYAN}Choice (1-2):{Colors.RESET} ").strip()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        print("\nKeeping original message.")
+        return
+    
+    if choice != "1":
+        return
+    
+    # Generate the stats-based body via merge_message
+    print(f"{Colors.DIM}Generating change summary...{Colors.RESET}")
+    generated_body = ""
+    try:
+        from gitship.merge_message import generate_merge_message
+        # Use the pre-cherry-pick state of target as base (HEAD~N where N = commits picked)
+        # Simpler and always correct: diff HEAD against the merge-base with source
+        merge_base_res = run_git(["merge-base", source, target], repo_path)
+        base_ref = merge_base_res.stdout.strip() if merge_base_res.returncode == 0 else f"{target}~1"
+        generated_body = generate_merge_message(
+            repo_path=repo_path,
+            base_ref=base_ref,
+            head_ref=target  # target now contains the picked commits
+        )
+    except ImportError:
+        print(f"{Colors.YELLOW}  merge_message not available — stats section will be skipped.{Colors.RESET}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}  Could not generate stats: {e}{Colors.RESET}")
+    
+    # Get current HEAD message so user can keep the subject line if they want
+    current_msg_res = run_git(["log", "-1", "--pretty=%B"], repo_path)
+    current_subject = current_msg_res.stdout.strip().split('\n')[0] if current_msg_res.returncode == 0 else ""
+    
+    # Let the user write their own subject / notes
+    print(f"\n{Colors.BOLD}Step 1: Subject line{Colors.RESET}")
+    print(f"{Colors.DIM}Current: {current_subject}{Colors.RESET}")
+    print("Enter a new subject, or press Enter to keep the current one:")
+    try:
+        new_subject = safe_input("Subject: ").strip()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        print("\nAmend cancelled.")
+        return
+    subject = new_subject if new_subject else current_subject
+    
+    print(f"\n{Colors.BOLD}Step 2: Your notes (optional){Colors.RESET}")
+    print("Add context about what was cherry-picked and why.")
+    print("  1. Type inline  (end with blank line)")
+    print("  2. Open editor")
+    print("  3. Skip")
+    try:
+        notes_choice = safe_input("Choose (1-3): ").strip()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        notes_choice = "3"
+    
+    user_notes = ""
+    if notes_choice == "1":
+        print(f"{Colors.DIM}Type your notes. When done, type 'END' on its own line:{Colors.RESET}")
+        note_lines = []
+        try:
+            while True:
+                line = safe_input()
+                if line.strip().upper() == "END":
+                    break
+                note_lines.append(line)
+        except (KeyboardInterrupt, EOFError, UserCancelled):
+            pass
+        user_notes = "\n".join(note_lines).strip()
+        
+        # Drain any remaining buffered stdin from paste so it doesn't
+        # bleed into subsequent input() calls (confirm prompt etc.)
+        import sys, termios, tty
+        try:
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass  # Non-TTY or Windows — best-effort only
+    
+    elif notes_choice == "2":
+        import tempfile, os
+        template = (
+            f"# Cherry-pick: {source} → {target}\n"
+            "# Lines starting with # are ignored.\n"
+            "# Describe what was cherry-picked and why.\n\n"
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+            temp_path = tf.name
+            tf.write(template)
+        editor = os.environ.get('EDITOR', 'nano')
+        try:
+            import subprocess
+            subprocess.run([editor, temp_path], check=True)
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            note_lines = [l.rstrip() for l in raw.splitlines() if not l.strip().startswith('#')]
+            while note_lines and not note_lines[0]: note_lines.pop(0)
+            while note_lines and not note_lines[-1]: note_lines.pop()
+            user_notes = "\n".join(note_lines).strip()
+        except Exception as e:
+            print(f"{Colors.YELLOW}  Editor error: {e}{Colors.RESET}")
+        finally:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+    
+    # Assemble the final message
+    parts = [subject, ""]
+    if user_notes:
+        parts.append(user_notes)
+        parts.append("")
+    if generated_body:
+        # Strip the generated title line — we already have our own subject
+        gen_lines = generated_body.split('\n')
+        body_only = '\n'.join(gen_lines[1:]).lstrip('\n')
+        if body_only.strip():
+            parts.append(body_only)
+    parts.append("[gitship-generated]")
+    
+    final_message = '\n'.join(parts).strip()
+    
+    # Preview — show full message, paged if long, before asking to confirm
+    print(f"\n{Colors.BOLD}Final commit message:{Colors.RESET}")
+    preview_lines = final_message.split('\n')
+    page_size = 30
+    
+    if len(preview_lines) <= page_size:
+        for line in preview_lines:
+            print(f"  {Colors.CYAN}{line}{Colors.RESET}")
+    else:
+        # Show in pages so user can actually read it
+        for i in range(0, len(preview_lines), page_size):
+            chunk = preview_lines[i:i + page_size]
+            for line in chunk:
+                print(f"  {Colors.CYAN}{line}{Colors.RESET}")
+            remaining = len(preview_lines) - (i + page_size)
+            if remaining > 0:
+                try:
+                    cont = safe_input(f"\n  {Colors.DIM}--- {remaining} more lines, Enter to continue, 'q' to stop paging ---{Colors.RESET} ").strip().lower()
+                    if cont == 'q':
+                        print(f"  {Colors.DIM}(message continues...){Colors.RESET}")
+                        break
+                except (KeyboardInterrupt, EOFError, UserCancelled):
+                    break
+    
+    try:
+        confirm = safe_input(f"\n{Colors.YELLOW}Amend commit with this message? (y/n):{Colors.RESET} ").strip().lower()
+    except (KeyboardInterrupt, EOFError, UserCancelled):
+        print("\nAmend cancelled.")
+        return
+    
+    if confirm == 'y':
+        amend_res = run_git(["commit", "--amend", "-m", final_message], repo_path)
+        if amend_res.returncode == 0:
+            print(f"{Colors.GREEN}✓ Commit message updated.{Colors.RESET}")
+            
+            # Offer to push — with pull --rebase first to handle diverged remote
+            try:
+                push_choice = safe_input(f"\n{Colors.CYAN}Push '{target}' to remote? (y/n):{Colors.RESET} ").strip().lower()
+            except (KeyboardInterrupt, EOFError, UserCancelled):
+                push_choice = 'n'
+            
+            if push_choice == 'y':
+                print(f"{Colors.DIM}Pulling remote changes (rebase) first...{Colors.RESET}")
+                pull_res = run_git(["pull", "--rebase", "origin", target], repo_path)
+                if pull_res.returncode != 0:
+                    print(f"{Colors.YELLOW}⚠️  Pull --rebase failed:{Colors.RESET}")
+                    print(pull_res.stderr.strip())
+                    print(f"{Colors.YELLOW}Resolve conflicts, then push manually: git push origin {target}{Colors.RESET}")
+                else:
+                    # Parse and surface any skipped commits — these are commits git
+                    # silently drops during rebase because it detects them as already
+                    # present (e.g. from a previous cherry-pick session).
+                    pull_output = pull_res.stdout + pull_res.stderr
+                    skipped = []
+                    for line in pull_output.splitlines():
+                        if "skipped previously applied commit" in line:
+                            sha = line.strip().split()[-1]
+                            # Get the subject for that sha
+                            subj_res = run_git(["log", "-1", "--pretty=%s", sha], repo_path)
+                            subj = subj_res.stdout.strip() if subj_res.returncode == 0 else ""
+                            skipped.append(f"{sha[:8]} {subj}" if subj else sha[:8])
+                    
+                    if skipped:
+                        print(f"{Colors.YELLOW}ℹ️  Rebase skipped {len(skipped)} commit(s) already present in remote:{Colors.RESET}")
+                        for s in skipped:
+                            print(f"   {Colors.DIM}• {s}{Colors.RESET}")
+                        print(f"{Colors.DIM}   These were detected as duplicates of prior cherry-picks — this is expected.{Colors.RESET}")
+                    elif pull_res.stdout.strip():
+                        print(pull_res.stdout.strip())
+                    
+                    push_res = run_git(["push", "origin", target], repo_path)
+                    if push_res.returncode == 0:
+                        print(f"{Colors.GREEN}✓ Pushed to origin/{target}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}✗ Push failed: {push_res.stderr.strip()}{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Amend failed: {amend_res.stderr.strip()}{Colors.RESET}")
+    else:
+        print("Keeping original message.")
+
+
 def compare_branches_simple(repo_path: Path, source: str, target: str):
     """Show directional comparison: Source -> Target."""
     
@@ -839,6 +1492,9 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     if not ensure_clean_git_state(repo_path):
         print(f"\n{Colors.RED}Cannot proceed with review while git state is interrupted.{Colors.RESET}")
         return
+
+    # Fetch so remote-divergence info is current (silent — offline safe)
+    _fetch_remote_quietly(repo_path)
 
     print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
     print(f"{Colors.BOLD}REVIEW: {Colors.CYAN}{source}{Colors.RESET} (Source) ➜ {Colors.CYAN}{target}{Colors.RESET} (Target)")
@@ -892,7 +1548,7 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
             print(f"  2. View full diff (content changes)")
             print(f"  3. Swap Source/Target")
             print(f"  0. Back")
-            choice = input(f"\n{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
+            choice = safe_input(f"\n{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
             if choice == "1":
                 handle_unrelated_histories(repo_path, source=source, target=target)
             elif choice == "2":
@@ -939,17 +1595,74 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     print(f"  5. Export this comparison")
     print(f"  0. Back")
     
-    choice = input(f"\n{Colors.BLUE}Choice (0-5):{Colors.RESET} ").strip()
+    choice = safe_input(f"\n{Colors.BLUE}Choice (0-5):{Colors.RESET} ").strip()
     
     if choice == "1":
         merge_branches_interactive(repo_path, source=source, target=target)
     elif choice == "2":
         print(f"\n{Colors.BOLD}🍒 CHERRY-PICK PREVIEW{Colors.RESET}")
+        
+        # Pre-flight: check if a cherry-pick is already in progress
+        cherry_pick_head = repo_path / ".git" / "CHERRY_PICK_HEAD"
+        if cherry_pick_head.exists():
+            print(f"{Colors.YELLOW}⚠️  A cherry-pick is already in progress on this repo.{Colors.RESET}")
+            conflicted = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip()
+            if conflicted:
+                print(f"\n{Colors.RED}Conflicted files still unresolved:{Colors.RESET}")
+                for f in conflicted.split('\n'):
+                    print(f"  ✗ {f}")
+            else:
+                print(f"\n{Colors.GREEN}No conflicted files — all resolved.{Colors.RESET}")
+            
+            print(f"\n{Colors.BOLD}What would you like to do with the in-progress cherry-pick?{Colors.RESET}")
+            print(f"  1. Resume — resolve conflicts interactively, then continue")
+            print(f"  2. Abort  — cancel it and restore to pre-cherry-pick state")
+            print(f"  3. Back")
+            
+            try:
+                stuck_choice = safe_input(f"\n{Colors.BLUE}Choice (1-3):{Colors.RESET} ").strip()
+            except (KeyboardInterrupt, EOFError, UserCancelled):
+                return
+            
+            if stuck_choice == "1":
+                # Route to resolver
+                if conflicted:
+                    try:
+                        from gitship.resolve_conflicts import main as resolve_main
+                        resolve_main()
+                    except ImportError:
+                        print(f"{Colors.YELLOW}Conflict resolver not available. Fix manually then run: git cherry-pick --continue{Colors.RESET}")
+                        return
+                # After resolution (or if already clean), continue
+                remaining = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip()
+                if remaining:
+                    print(f"{Colors.YELLOW}Still unresolved files. Finish resolving before continuing.{Colors.RESET}")
+                    return
+                cont = safe_input(f"\n{Colors.CYAN}Continue cherry-pick now? (y/n):{Colors.RESET} ").strip().lower()
+                if cont == 'y':
+                    cont_res = run_git(["cherry-pick", "--continue", "--no-edit"], repo_path)
+                    if cont_res.returncode == 0:
+                        print(f"{Colors.GREEN}✅ Cherry-pick completed.{Colors.RESET}")
+                        _offer_cherry_pick_commit_amend(repo_path, source, target)
+                    else:
+                        print(f"{Colors.RED}✗ Continue failed: {cont_res.stderr.strip()}{Colors.RESET}")
+                return
+            
+            elif stuck_choice == "2":
+                abort_res = run_git(["cherry-pick", "--abort"], repo_path)
+                if abort_res.returncode == 0:
+                    print(f"{Colors.GREEN}✓ Cherry-pick aborted. Repository restored to clean state.{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}✗ Abort failed: {abort_res.stderr.strip()}{Colors.RESET}")
+                return
+            
+            else:
+                return
+
         print(f"This will apply {len(incoming_list)} commit(s) from {Colors.CYAN}{source}{Colors.RESET} to {Colors.CYAN}{target}{Colors.RESET}")
         print(f"\n{Colors.BOLD}Commits to apply:{Colors.RESET}")
-        for commit_sha in incoming_list[:10]:  # Show first 10
-            log_result = run_git(["log", "-1", "--oneline", commit_sha], repo_path)
-            print(f"  + {log_result.stdout.strip()}")
+        for line in incoming_list[:10]:  # Already formatted "hash message" strings
+            print(f"  + {line}")
         if len(incoming_list) > 10:
             print(f"  ... and {len(incoming_list) - 10} more")
         
@@ -957,7 +1670,7 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
         diff_stat = run_git(["diff", "--stat", f"{target}...{source}"], repo_path)
         print(diff_stat.stdout)
         
-        confirm = input(f"\n{Colors.YELLOW}Proceed with cherry-pick? (y/n):{Colors.RESET} ").strip().lower()
+        confirm = safe_input(f"\n{Colors.YELLOW}Proceed with cherry-pick? (y/n):{Colors.RESET} ").strip().lower()
         if confirm != 'y':
             print(f"{Colors.YELLOW}Cancelled{Colors.RESET}")
             return
@@ -979,10 +1692,20 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
                     restore_latest_stash(repo_path)
                 return
         
-        # Get revisions in chronological order (oldest first)
-        revs = run_git(["rev-list", "--reverse", f"{target}..{source}"], repo_path).stdout.strip().split()
+        # Get revisions in chronological order (oldest first), excluding merge commits
+        all_revs = run_git(["rev-list", "--reverse", "--no-merges", f"{target}..{source}"], repo_path).stdout.strip().split()
+        
+        # Also get full list to detect skipped merges
+        all_revs_with_merges = run_git(["rev-list", "--reverse", f"{target}..{source}"], repo_path).stdout.strip().split()
+        merge_count = len(all_revs_with_merges) - len(all_revs)
+        
+        if merge_count > 0:
+            print(f"{Colors.YELLOW}⚠️  Skipping {merge_count} merge commit(s) (not directly cherry-pickable).{Colors.RESET}")
+            print(f"{Colors.DIM}   Tip: Use 'Merge' (option 1) if you want merge commits included.{Colors.RESET}")
+        
+        revs = all_revs
         if not revs:
-            print("No commits to pick.")
+            print(f"{Colors.YELLOW}No non-merge commits to cherry-pick. Consider using Merge instead (option 1).{Colors.RESET}")
             if stashed:
                 restore_latest_stash(repo_path)
             return
@@ -998,8 +1721,11 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
             show_result = run_git(["show", "--stat", "HEAD"], repo_path)
             print(show_result.stdout)
             
+            # Offer to amend with a detailed commit message
+            _offer_cherry_pick_commit_amend(repo_path, source, target)
+            
             # Offer to push
-            push_choice = input(f"\n{Colors.CYAN}Push to remote? (y/n):{Colors.RESET} ").strip().lower()
+            push_choice = safe_input(f"\n{Colors.CYAN}Push to remote? (y/n):{Colors.RESET} ").strip().lower()
             if push_choice == 'y':
                 push_result = atomic_git_operation(
                     repo_path=repo_path,
@@ -1019,63 +1745,195 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
             # Git returns error 1 but stderr contains specific hints
             err_msg = res.stderr + res.stdout
             
-            is_empty = "The previous cherry-pick is now empty" in err_msg or \
-                       "allow-empty" in err_msg or \
-                       "git cherry-pick --skip" in err_msg
+            # IMPORTANT: "cherry-pick is already in progress" also triggers
+            # "git cherry-pick --skip" in its hint text, so we must exclude it
+            # explicitly before checking is_empty, otherwise we'd wrongly skip
+            # commits that were never actually applied.
+            is_already_in_progress = "cherry-pick is already in progress" in err_msg
+            
+            is_empty = not is_already_in_progress and (
+                "The previous cherry-pick is now empty" in err_msg or \
+                "allow-empty" in err_msg or \
+                "git cherry-pick --skip" in err_msg
+            )
             
             if is_empty:
-                print(f"{Colors.YELLOW}💡 Patch is empty or already exists in target.{Colors.RESET}")
-                print(f"{Colors.DIM}   Skipping redundant commit...{Colors.RESET}")
+                print(f"{Colors.YELLOW}💡 One or more commits are empty (already applied or conflict-resolved away).{Colors.RESET}")
+                print(f"{Colors.DIM}   Skipping through empty commits...{Colors.RESET}")
                 
-                skip_res = run_git(["cherry-pick", "--skip"], repo_path)
+                # Loop: keep skipping empty commits until cherry-pick completes,
+                # hits a real conflict, or genuinely errors out.
+                # A batch pick of N commits can have multiple empty ones in sequence.
+                skip_loop_limit = len(revs) + 2  # Safety ceiling
+                final_skip_res = None
+                skipped_count = 0
                 
-                if skip_res.returncode == 0:
-                    print(f"{Colors.GREEN}✅ Successfully synced (skipped redundant patches).{Colors.RESET}")
+                for _ in range(skip_loop_limit):
+                    skip_res = run_git(["cherry-pick", "--skip"], repo_path)
+                    skipped_count += 1
+                    
+                    # Success — no more commits to pick
+                    if skip_res.returncode == 0 and not (repo_path / ".git" / "CHERRY_PICK_HEAD").exists():
+                        final_skip_res = skip_res
+                        break
+                    
+                    skip_err = skip_res.stderr + skip_res.stdout
+                    
+                    # Still empty — loop again
+                    if "The previous cherry-pick is now empty" in skip_err or \
+                       "git cherry-pick --skip" in skip_err:
+                        continue
+                    
+                    # Real conflict hit during skip sequence
+                    if skip_res.returncode != 0:
+                        final_skip_res = skip_res
+                        break
+                    
+                    # returncode 0 but CHERRY_PICK_HEAD still exists — still in progress
+                    # (can happen mid-batch), loop to pick the next commit
+                    if (repo_path / ".git" / "CHERRY_PICK_HEAD").exists():
+                        # Next commit landed cleanly, check if we're done
+                        continue
+                    
+                    final_skip_res = skip_res
+                    break
+                
+                # Check final state
+                pick_still_active = (repo_path / ".git" / "CHERRY_PICK_HEAD").exists()
+                conflicted_files = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path).stdout.strip()
+                
+                if not pick_still_active and not conflicted_files:
+                    print(f"{Colors.GREEN}✅ Successfully completed (skipped {skipped_count} empty commit(s)).{Colors.RESET}")
                     if stashed:
                         restore_latest_stash(repo_path)
                     
-                    # Offer to delete the now-redundant source branch
-                    print(f"\n{Colors.YELLOW}💡 Branch '{source}' is now redundant (changes already in '{target}'){Colors.RESET}")
-                    delete_offer = input(f"Delete branch '{source}'? (y/n): ").strip().lower()
+                    _offer_cherry_pick_commit_amend(repo_path, source, target)
                     
-                    if delete_offer == 'y':
-                        # Check if we're on the source branch
-                        current_branch_res = run_git(["branch", "--show-current"], repo_path)
-                        current_branch = current_branch_res.stdout.strip()
-                        
-                        if current_branch == source:
-                            print(f"{Colors.YELLOW}⚠️  Currently on '{source}', switching to '{target}' first...{Colors.RESET}")
-                            switch_res = run_git(["checkout", target], repo_path)
-                            if switch_res.returncode != 0:
-                                print(f"{Colors.RED}✗ Failed to switch branches{Colors.RESET}")
-                                return
-                        
-                        # Delete local branch
-                        delete_res = run_git(["branch", "-d", source], repo_path)
-                        if delete_res.returncode == 0:
-                            print(f"{Colors.GREEN}✓ Deleted local branch '{source}'{Colors.RESET}")
-                            
-                            # Offer to delete remote too
-                            delete_remote = input(f"Also delete remote branch 'origin/{source}'? (y/n): ").strip().lower()
-                            if delete_remote == 'y':
-                                remote_del = run_git(["push", "origin", "--delete", source], repo_path)
-                                if remote_del.returncode == 0:
-                                    print(f"{Colors.GREEN}✓ Deleted remote branch 'origin/{source}'{Colors.RESET}")
-                                else:
-                                    print(f"{Colors.YELLOW}⚠️  Remote delete failed (may not exist): {remote_del.stderr.strip()}{Colors.RESET}")
-                        else:
-                            print(f"{Colors.RED}✗ Delete failed: {delete_res.stderr.strip()}{Colors.RESET}")
+                    # Verify actual file parity before claiming branch is redundant
+                    mb_res = run_git(["merge-base", source, target], repo_path)
+                    actually_redundant = False
+                    if mb_res.returncode == 0:
+                        merge_base = mb_res.stdout.strip()
+                        files_res = run_git(["diff", "--name-only", f"{merge_base}..{source}"], repo_path)
+                        changed_files = [f for f in files_res.stdout.strip().split('\n') if f]
+                        mismatches = sum(
+                            1 for f in changed_files
+                            if run_git(["rev-parse", f"{source}:{f}"], repo_path).stdout.strip() !=
+                               run_git(["rev-parse", f"{target}:{f}"], repo_path).stdout.strip()
+                        )
+                        actually_redundant = (mismatches == 0)
                     
+                    if actually_redundant:
+                        current_br = get_current_branch(repo_path)
+                        confirm_and_delete_branch(
+                            repo_path, source, current_br,
+                            context=f"All changes from '{source}' are confirmed present in '{target}'."
+                        )
+                    else:
+                        print(f"\n{Colors.YELLOW}⚠️  Some files in '{source}' still differ from '{target}' — branch not deleted.{Colors.RESET}")
+                        print(f"   Review the diff before deciding to delete '{source}'.")
                     return
+                
+                elif conflicted_files:
+                    # Skip sequence hit a real conflict — fall through to the conflict handler below
+                    print(f"{Colors.YELLOW}Skipped {skipped_count} empty commit(s), but hit a real conflict:{Colors.RESET}")
+                    for f in conflicted_files.split('\n'):
+                        print(f"  ✗ {f}")
+                    # Fall through to the conflict options menu below
+                
                 else:
-                    print(f"{Colors.RED}✗ Failed to skip: {skip_res.stderr}{Colors.RESET}")
+                    # Skip loop exhausted or unexpected error
+                    print(f"{Colors.RED}✗ Could not complete skip sequence after {skipped_count} attempt(s).{Colors.RESET}")
+                    if final_skip_res:
+                        print(f"  {final_skip_res.stderr.strip()}")
+                    # Fall through to conflict options menu
 
             # If not empty (or skip failed), it's a real conflict
             print(f"{Colors.RED}❌ Cherry-pick encountered conflicts.{Colors.RESET}")
             print(res.stderr)
-            print(f"\n{Colors.YELLOW}Fix conflicts manually, then run 'git cherry-pick --continue'{Colors.RESET}")
             if stashed:
-                print(f"\n{Colors.MAGENTA}📦 Note: Ignorable files are stashed. Run 'git stash pop' AFTER you finish resolving conflicts.{Colors.RESET}")
+                print(f"\n{Colors.MAGENTA}📦 Note: Background changes are stashed and will be auto-restored when you finish.{Colors.RESET}")
+            
+            # Only offer interactive resolve if cherry-pick state is actually present on disk.
+            # If git errored because a pick was ALREADY in progress (e.g. leftover from a
+            # previous session), CHERRY_PICK_HEAD will be absent in repo_path and the
+            # resolver will fail with "Not in a cherry-pick state". In that case, force
+            # the user to abort/exit so they can deal with the real stuck repo first.
+            cherry_pick_active = (repo_path / ".git" / "CHERRY_PICK_HEAD").exists()
+            
+            print(f"\n{Colors.BOLD}What would you like to do?{Colors.RESET}")
+            if cherry_pick_active:
+                print(f"  1. Resolve conflicts interactively (guided)")
+                print(f"  2. Abort cherry-pick and return to previous state")
+                print(f"  3. Leave as-is (fix manually, then run 'git cherry-pick --continue')")
+                max_choice = "3"
+            else:
+                # Cherry-pick state not present here — the error was likely "already in
+                # progress" on the target branch. Interactive resolve would fail silently.
+                print(f"{Colors.YELLOW}  ⚠️  The cherry-pick state is on '{target}', not the current branch.{Colors.RESET}")
+                print(f"{Colors.YELLOW}     Switch to '{target}' and run 'gitship branch' → Compare → Cherry-pick{Colors.RESET}")
+                print(f"{Colors.YELLOW}     to resume or abort the stuck operation there.{Colors.RESET}")
+                print(f"  1. Abort the stuck cherry-pick on '{target}' now")
+                print(f"  2. Leave as-is and exit")
+                max_choice = "2"
+            
+            conflict_choice = safe_input(f"\n{Colors.BLUE}Choice (1-{max_choice}):{Colors.RESET} ").strip()
+            
+            if cherry_pick_active:
+                if conflict_choice == "1":
+                    try:
+                        from gitship.resolve_conflicts import main as resolve_main
+                        resolve_main()
+                        # After resolution, prompt to continue
+                        cont = safe_input(f"\n{Colors.CYAN}Continue cherry-pick? (y/n):{Colors.RESET} ").strip().lower()
+                        if cont == 'y':
+                            cont_res = run_git(["cherry-pick", "--continue", "--no-edit"], repo_path)
+                            if cont_res.returncode == 0:
+                                print(f"{Colors.GREEN}✅ Cherry-pick completed successfully.{Colors.RESET}")
+                                _offer_cherry_pick_commit_amend(repo_path, source, target)
+                            else:
+                                print(f"{Colors.RED}✗ Continue failed: {cont_res.stderr.strip()}{Colors.RESET}")
+                    except ImportError:
+                        print(f"{Colors.YELLOW}Conflict resolver not available. Fix conflicts manually, then run:{Colors.RESET}")
+                        print(f"  git add .")
+                        print(f"  git cherry-pick --continue")
+                
+                elif conflict_choice == "2":
+                    abort_res = run_git(["cherry-pick", "--abort"], repo_path)
+                    if abort_res.returncode == 0:
+                        print(f"{Colors.GREEN}✓ Cherry-pick aborted. Repository restored to previous state.{Colors.RESET}")
+                        if stashed:
+                            restore_latest_stash(repo_path)
+                    else:
+                        print(f"{Colors.RED}✗ Abort failed: {abort_res.stderr.strip()}{Colors.RESET}")
+                
+                else:
+                    print(f"\n{Colors.YELLOW}Fix conflicts manually, then run:{Colors.RESET}")
+                    print(f"  git add .")
+                    print(f"  git cherry-pick --continue")
+            
+            else:
+                # Not cherry_pick_active — target branch has the stuck pick
+                if conflict_choice == "1":
+                    # Abort on the target branch by temporarily switching to it
+                    print(f"\n{Colors.DIM}Switching to '{target}' to abort...{Colors.RESET}")
+                    sw = run_git(["checkout", target], repo_path)
+                    if sw.returncode != 0:
+                        print(f"{Colors.RED}✗ Could not switch to '{target}': {sw.stderr.strip()}{Colors.RESET}")
+                        print(f"  Run manually: git checkout {target} && git cherry-pick --abort")
+                    else:
+                        abort_res = run_git(["cherry-pick", "--abort"], repo_path)
+                        if abort_res.returncode == 0:
+                            print(f"{Colors.GREEN}✓ Stuck cherry-pick on '{target}' aborted.{Colors.RESET}")
+                            # Switch back to where we were
+                            run_git(["checkout", source], repo_path)
+                            print(f"{Colors.GREEN}✓ Switched back to '{source}'.{Colors.RESET}")
+                        else:
+                            print(f"{Colors.RED}✗ Abort failed: {abort_res.stderr.strip()}{Colors.RESET}")
+                else:
+                    print(f"\n{Colors.YELLOW}Left as-is. To clean up manually:{Colors.RESET}")
+                    print(f"  git checkout {target}")
+                    print(f"  git cherry-pick --abort")
     
     elif choice == "3":
         print(f"\n{Colors.BOLD}📄 FULL DIFF ({source} vs {target}):{Colors.RESET}")
@@ -1087,7 +1945,7 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
         else:
             print("(No content changes)")
         print("="*60)
-        input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+        safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
         # Re-show the menu
         compare_branches_simple(repo_path, source, target)
 
@@ -1162,7 +2020,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
     print(f"  5. Restore recently deleted branch from remote")
     print(f"  0. Back")
     
-    choice = input(f"\n{Colors.CYAN}Choose option:{Colors.RESET} ").strip()
+    choice = safe_input(f"\n{Colors.CYAN}Choose option:{Colors.RESET} ").strip()
     
     if choice == "1":
         # Delete redundant branches
@@ -1171,7 +2029,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             return
         
         print(f"\n{Colors.YELLOW}⚠️  This will delete {len(redundant)} redundant branch(es) locally and remotely{Colors.RESET}")
-        confirm = input("Continue? (yes/no): ").strip().lower()
+        confirm = safe_input("Continue? (yes/no): ").strip().lower()
         
         if confirm != "yes":
             print(f"{Colors.YELLOW}Cancelled{Colors.RESET}")
@@ -1234,7 +2092,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             print(f"  3. Delete this branch")
             print(f"  0. Stop reviewing")
             
-            action = input(f"\n{Colors.CYAN}Choose action:{Colors.RESET} ").strip()
+            action = safe_input(f"\n{Colors.CYAN}Choose action:{Colors.RESET} ").strip()
             
             if action == "1":
                 # Cherry-pick with smart commit message
@@ -1254,7 +2112,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                     if len(commits) > 10:
                         print(f"  ... and {len(commits) - 10} more")
                 
-                confirm_pick = input(f"\n{Colors.YELLOW}Proceed with cherry-pick? (y/n):{Colors.RESET} ").strip().lower()
+                confirm_pick = safe_input(f"\n{Colors.YELLOW}Proceed with cherry-pick? (y/n):{Colors.RESET} ").strip().lower()
                 if confirm_pick == 'y':
                     # Perform cherry-pick
                     stashed = stash_ignored_changes(repo_path, f"Before cherry-pick {branch}")
@@ -1281,7 +2139,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                         print(show_result.stdout)
                         
                         # Offer to push and delete
-                        push_choice = input(f"\n{Colors.CYAN}Push to remote? (y/n):{Colors.RESET} ").strip().lower()
+                        push_choice = safe_input(f"\n{Colors.CYAN}Push to remote? (y/n):{Colors.RESET} ").strip().lower()
                         if push_choice == 'y':
                             push_result = atomic_git_operation(
                                 repo_path=repo_path,
@@ -1291,7 +2149,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                             if push_result.returncode == 0:
                                 print(f"{Colors.GREEN}✓ Pushed{Colors.RESET}")
                         
-                        delete_choice = input(f"\n{Colors.CYAN}Delete '{branch}' (local + remote)? (y/n):{Colors.RESET} ").strip().lower()
+                        delete_choice = safe_input(f"\n{Colors.CYAN}Delete '{branch}' (local + remote)? (y/n):{Colors.RESET} ").strip().lower()
                         if delete_choice == 'y':
                             delete_branch(repo_path, branch, force=True, delete_remote=True)
                     else:
@@ -1313,7 +2171,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                             
                             # Branch is redundant, offer to delete
                             print(f"\n{Colors.YELLOW}💡 Branch '{branch}' appears redundant (changes already in '{target_branch}'){Colors.RESET}")
-                            delete_choice = input(f"Delete '{branch}' (local + remote)? (y/n): ").strip().lower()
+                            delete_choice = safe_input(f"Delete '{branch}' (local + remote)? (y/n): ").strip().lower()
                             if delete_choice == 'y':
                                 delete_branch(repo_path, branch, force=True, delete_remote=True)
                         else:
@@ -1326,12 +2184,12 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                             print(f"  Or run: git cherry-pick --abort to cancel")
                             
                             if stashed:
-                                print(f"\n{Colors.MAGENTA}📦 Note: Stashed changes exist. Run 'git stash pop' after resolving.{Colors.RESET}")
+                                print(f"\n{Colors.MAGENTA}📦 Background changes are stashed and will be auto-restored when done.{Colors.RESET}")
                             return  # Exit cleanup to let user handle it
             
             elif action == "3":
                 # Delete branch
-                delete_choice = input(f"\n{Colors.YELLOW}Delete '{branch}' (local + remote)? (yes/no):{Colors.RESET} ").strip().lower()
+                delete_choice = safe_input(f"\n{Colors.YELLOW}Delete '{branch}' (local + remote)? (yes/no):{Colors.RESET} ").strip().lower()
                 if delete_choice == "yes":
                     delete_branch(repo_path, branch, force=True, delete_remote=True)
             
@@ -1363,7 +2221,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             for branch in deleted:
                 print(f"  - {branch}")
             
-            confirm = input(f"\n{Colors.YELLOW}Delete these from remote? (yes/no):{Colors.RESET} ").strip().lower()
+            confirm = safe_input(f"\n{Colors.YELLOW}Delete these from remote? (yes/no):{Colors.RESET} ").strip().lower()
             if confirm == "yes":
                 for branch in deleted:
                     result = atomic_git_operation(
@@ -1383,7 +2241,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
         for i, branch in enumerate(all_branches, 1):
             print(f"  {i}. {branch}")
         
-        sel = input(f"\n{Colors.CYAN}Enter number:{Colors.RESET} ").strip()
+        sel = safe_input(f"\n{Colors.CYAN}Enter number:{Colors.RESET} ").strip()
         if sel.isdigit():
             idx = int(sel) - 1
             if 0 <= idx < len(all_branches):
@@ -1438,7 +2296,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             print(f"{Colors.YELLOW}No remote branches to restore{Colors.RESET}")
             return
         
-        sel = input(f"\n{Colors.CYAN}Enter number to restore:{Colors.RESET} ").strip()
+        sel = safe_input(f"\n{Colors.CYAN}Enter number to restore:{Colors.RESET} ").strip()
         
         if sel.isdigit():
             idx = int(sel) - 1
@@ -1454,7 +2312,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                     print(f"{Colors.GREEN}✓ Restored branch '{branch_to_restore}' from {remote}{Colors.RESET}")
                     
                     # Offer to switch to it
-                    switch_choice = input(f"\n{Colors.CYAN}Switch to '{branch_to_restore}'? (y/n):{Colors.RESET} ").strip().lower()
+                    switch_choice = safe_input(f"\n{Colors.CYAN}Switch to '{branch_to_restore}'? (y/n):{Colors.RESET} ").strip().lower()
                     if switch_choice == 'y':
                         switch_result = run_git(["checkout", branch_to_restore], repo_path, check=False)
                         if switch_result.returncode == 0:
@@ -1473,6 +2331,16 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
 
 def show_branch_menu(repo_path: Path):
     """Interactive menu for branch operations."""
+    signal.signal(signal.SIGINT, _sigint_handler)
+    try:
+        _show_branch_menu_inner(repo_path)
+    except UserCancelled:
+        print(f"\n\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
+        sys.exit(0)
+
+
+def _show_branch_menu_inner(repo_path: Path):
+    """Interactive menu for branch operations — inner loop."""
     while True:
         current = get_current_branch(repo_path)
         default = get_default_branch(repo_path)
@@ -1504,8 +2372,8 @@ def show_branch_menu(repo_path: Path):
         print("  0. Exit")
         
         try:
-            choice = input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9):{Colors.RESET} ").strip()
-        except (KeyboardInterrupt, EOFError):
+            choice = safe_input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9):{Colors.RESET} ").strip()
+        except (KeyboardInterrupt, EOFError, UserCancelled):
             print(f"\n\n{Colors.YELLOW}Cancelled{Colors.RESET}")
             break
         
@@ -1518,15 +2386,15 @@ def show_branch_menu(repo_path: Path):
         
         elif choice == "1":
             # Create new branch
-            branch_name = input(f"{Colors.CYAN}Enter new branch name:{Colors.RESET} ").strip()
+            branch_name = safe_input(f"{Colors.CYAN}Enter new branch name:{Colors.RESET} ").strip()
             if not branch_name:
                 print(f"{Colors.RED}Branch name cannot be empty{Colors.RESET}")
                 continue
             
-            from_ref = input(f"{Colors.CYAN}Create from (Enter for current HEAD):{Colors.RESET} ").strip()
+            from_ref = safe_input(f"{Colors.CYAN}Create from (Enter for current HEAD):{Colors.RESET} ").strip()
             create_branch(repo_path, branch_name, from_ref if from_ref else None)
             
-            switch = input(f"{Colors.CYAN}Switch to new branch? (y/n):{Colors.RESET} ").strip().lower()
+            switch = safe_input(f"{Colors.CYAN}Switch to new branch? (y/n):{Colors.RESET} ").strip().lower()
             if switch == 'y':
                 switch_branch(repo_path, branch_name)
         
@@ -1537,7 +2405,7 @@ def show_branch_menu(repo_path: Path):
                 marker = f"{Colors.BRIGHT_GREEN}(current){Colors.RESET}" if branch == current else ""
                 print(f"  {i}. {branch} {marker}")
             
-            selection = input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
+            selection = safe_input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
             
             if selection.isdigit():
                 idx = int(selection) - 1
@@ -1554,12 +2422,12 @@ def show_branch_menu(repo_path: Path):
                 print(f"{Colors.RED}Cannot rename - not on a branch (detached HEAD){Colors.RESET}")
                 continue
             
-            new_name = input(f"{Colors.CYAN}Enter new name for '{current}':{Colors.RESET} ").strip()
+            new_name = safe_input(f"{Colors.CYAN}Enter new name for '{current}':{Colors.RESET} ").strip()
             if not new_name:
                 print(f"{Colors.RED}Branch name cannot be empty{Colors.RESET}")
                 continue
             
-            update_remote = input(f"{Colors.CYAN}Update remote as well? (y/n):{Colors.RESET} ").strip().lower()
+            update_remote = safe_input(f"{Colors.CYAN}Update remote as well? (y/n):{Colors.RESET} ").strip().lower()
             rename_branch(repo_path, current, new_name, update_remote == 'y')
         
         elif choice == "4":
@@ -1569,7 +2437,7 @@ def show_branch_menu(repo_path: Path):
                 default_marker = f"{Colors.BRIGHT_CYAN}(current default){Colors.RESET}" if branch == default else ""
                 print(f"  {i}. {branch} {default_marker}")
             
-            selection = input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
+            selection = safe_input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
             
             branch_name = None
             if selection.isdigit():
@@ -1583,7 +2451,7 @@ def show_branch_menu(repo_path: Path):
                 branch_name = selection
             
             if branch_name:
-                confirm = input(f"{Colors.YELLOW}Set '{branch_name}' as default branch? (y/n):{Colors.RESET} ").strip().lower()
+                confirm = safe_input(f"{Colors.YELLOW}Set '{branch_name}' as default branch? (y/n):{Colors.RESET} ").strip().lower()
                 if confirm == 'y':
                     change_default_branch(repo_path, branch_name)
         
@@ -1599,7 +2467,7 @@ def show_branch_menu(repo_path: Path):
             for i, branch in enumerate(deletable, 1):
                 print(f"  {i}. {branch}")
             
-            selection = input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
+            selection = safe_input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
             
             branch_name = None
             if selection.isdigit():
@@ -1616,17 +2484,7 @@ def show_branch_menu(repo_path: Path):
                 print(f"{Colors.RED}Cannot delete current branch{Colors.RESET}")
                 continue
             
-            force = input(f"{Colors.YELLOW}Force delete (may lose unmerged changes)? (y/n):{Colors.RESET} ").strip().lower()
-            
-            # Check if branch exists on remote
-            check_remote = run_git(["ls-remote", "--heads", "origin", branch_name], repo_path, check=False)
-            delete_remote = False
-            
-            if check_remote.returncode == 0 and check_remote.stdout.strip():
-                delete_remote_input = input(f"{Colors.CYAN}Also delete from remote? (y/n):{Colors.RESET} ").strip().lower()
-                delete_remote = (delete_remote_input == 'y')
-            
-            delete_branch(repo_path, branch_name, force == 'y', delete_remote)
+            confirm_and_delete_branch(repo_path, branch_name, current)
         
         elif choice == "6":
             # List all branches
@@ -1642,7 +2500,7 @@ def show_branch_menu(repo_path: Path):
                     display = branch.replace('remotes/origin/', '')
                     print(f"  {display}")
             
-            input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+            safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
         
         elif choice == "7":
             # Manage remote branches
@@ -1655,7 +2513,7 @@ def show_branch_menu(repo_path: Path):
             print("  6. Sync deletions to remote (delete remote branches deleted locally)")
             print("  7. Push local branch to remote")
             
-            remote_choice = input(f"\n{Colors.CYAN}Choose option:{Colors.RESET} ").strip()
+            remote_choice = safe_input(f"\n{Colors.CYAN}Choose option:{Colors.RESET} ").strip()
             
             if remote_choice == "1":
                 # Fetch all remotes
@@ -1691,7 +2549,7 @@ def show_branch_menu(repo_path: Path):
                     print(f"{Colors.YELLOW}All remote branches already local{Colors.RESET}")
                     continue
                 
-                selection = input(f"\n{Colors.CYAN}Enter number or name:{Colors.RESET} ").strip()
+                selection = safe_input(f"\n{Colors.CYAN}Enter number or name:{Colors.RESET} ").strip()
                 
                 branch_to_fetch = None
                 if selection.isdigit():
@@ -1708,7 +2566,7 @@ def show_branch_menu(repo_path: Path):
                         print(f"{Colors.GREEN}✓ Fetched '{branch_to_fetch}' locally{Colors.RESET}")
                         
                         # Offer to switch
-                        switch = input(f"{Colors.CYAN}Switch to it now? (y/n):{Colors.RESET} ").strip().lower()
+                        switch = safe_input(f"{Colors.CYAN}Switch to it now? (y/n):{Colors.RESET} ").strip().lower()
                         if switch == 'y':
                             switch_result = run_git(["checkout", branch_to_fetch], repo_path)
                             if switch_result.returncode == 0:
@@ -1761,7 +2619,7 @@ def show_branch_menu(repo_path: Path):
                     if len(branch_list) > 10:
                         print(f"    ... and {len(branch_list)-10} more")
                 
-                confirm = input(f"\n{Colors.CYAN}Fetch ALL {total_count} branches locally? (y/n):{Colors.RESET} ").strip().lower()
+                confirm = safe_input(f"\n{Colors.CYAN}Fetch ALL {total_count} branches locally? (y/n):{Colors.RESET} ").strip().lower()
                 
                 if confirm == 'y':
                     print(f"\n{Colors.BRIGHT_BLUE}Fetching {total_count} branches...{Colors.RESET}")
@@ -1808,7 +2666,7 @@ def show_branch_menu(repo_path: Path):
                     print(f"{Colors.YELLOW}No branches to delete{Colors.RESET}")
                     continue
                 
-                selection = input(f"\n{Colors.CYAN}Enter number or name to delete:{Colors.RESET} ").strip()
+                selection = safe_input(f"\n{Colors.CYAN}Enter number or name to delete:{Colors.RESET} ").strip()
                 
                 branch_to_delete = None
                 if selection.isdigit():
@@ -1820,7 +2678,7 @@ def show_branch_menu(repo_path: Path):
                 
                 if branch_to_delete:
                     print(f"\n{Colors.YELLOW}⚠️  Delete origin/{branch_to_delete}?{Colors.RESET}")
-                    confirm = input(f"{Colors.CYAN}Confirm (y/n):{Colors.RESET} ").strip().lower()
+                    confirm = safe_input(f"{Colors.CYAN}Confirm (y/n):{Colors.RESET} ").strip().lower()
                     
                     if confirm == 'y':
                         result = atomic_git_operation(
@@ -1877,7 +2735,7 @@ def show_branch_menu(repo_path: Path):
                         print(f"  {i}. {branch_name}")
                     
                     print(f"\n{Colors.YELLOW}⚠️  This will DELETE these branches from origin{Colors.RESET}")
-                    confirm = input("Delete all listed branches from remote? (yes/no): ").strip().lower()
+                    confirm = safe_input("Delete all listed branches from remote? (yes/no): ").strip().lower()
                     
                     if confirm == 'yes':
                         print(f"\n{Colors.BRIGHT_BLUE}Deleting {len(deleted)} branches from origin...{Colors.RESET}")
@@ -1928,7 +2786,7 @@ def show_branch_menu(repo_path: Path):
                     for i, r in enumerate(remotes, 1):
                         print(f"  {i}. {r}")
                     
-                    remote_sel = input(f"\n{Colors.CYAN}Select remote (default=origin):{Colors.RESET} ").strip()
+                    remote_sel = safe_input(f"\n{Colors.CYAN}Select remote (default=origin):{Colors.RESET} ").strip()
                     if remote_sel.isdigit():
                         idx = int(remote_sel) - 1
                         if 0 <= idx < len(remotes):
@@ -1947,7 +2805,7 @@ def show_branch_menu(repo_path: Path):
                     marker = f" {Colors.BRIGHT_GREEN}(current){Colors.RESET}" if branch == current else ""
                     print(f"  {i}. {branch}{marker}")
                 
-                branch_sel = input(f"\n{Colors.CYAN}Enter number (default=current branch):{Colors.RESET} ").strip()
+                branch_sel = safe_input(f"\n{Colors.CYAN}Enter number (default=current branch):{Colors.RESET} ").strip()
                 
                 branch_to_push = None
                 if branch_sel.isdigit():
@@ -1966,7 +2824,7 @@ def show_branch_menu(repo_path: Path):
                     
                     if exists_on_remote:
                         print(f"\n{Colors.YELLOW}Branch '{branch_to_push}' already exists on {remote}{Colors.RESET}")
-                        force = input(f"Force push? (y/n): ").strip().lower()
+                        force = safe_input(f"Force push? (y/n): ").strip().lower()
                         
                         if force == 'y':
                             result = atomic_git_operation(
@@ -2007,7 +2865,7 @@ def show_branch_menu(repo_path: Path):
                 
                 # Get Source Branch
                 print(f"\n{Colors.DIM}Step 1: Select the SOURCE branch (The one containing the patch/feature){Colors.RESET}")
-                b1_sel = input(f"{Colors.CYAN}Source branch (number/name, 'b' for back):{Colors.RESET} ").strip()
+                b1_sel = safe_input(f"{Colors.CYAN}Source branch (number/name, 'b' for back):{Colors.RESET} ").strip()
                 if b1_sel.lower() == 'b':
                     break
                 
@@ -2026,7 +2884,7 @@ def show_branch_menu(repo_path: Path):
                 # Get Target Branch
                 default_target = current if current != branch1 else default
                 print(f"\n{Colors.DIM}Step 2: Select the TARGET branch (Where you want to merge/apply the changes){Colors.RESET}")
-                b2_sel = input(f"{Colors.CYAN}Target branch (default={Colors.BRIGHT_GREEN}{default_target}{Colors.RESET}):{Colors.RESET} ").strip()
+                b2_sel = safe_input(f"{Colors.CYAN}Target branch (default={Colors.BRIGHT_GREEN}{default_target}{Colors.RESET}):{Colors.RESET} ").strip()
                 
                 if not b2_sel:
                     branch2 = default_target

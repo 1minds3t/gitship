@@ -518,7 +518,8 @@ class CommitMessageBuilder:
             header_parts.append(f"Update {len(changes['code'])} code files")
         
         if changes['translations']:
-            header_parts.append(f"Update translations ({len(changes['translations'])} languages)")
+            # Translations are stashed during commit — don't include in the suggested title
+            pass
         
         if changes['tests']:
             header_parts.append("Update tests")
@@ -1891,6 +1892,7 @@ def commit_translations_only(analyzer: ChangeAnalyzer):
     if desc_choice == '1':
         print()
         print(f"{Colors.DIM}Enter your description. Finish with an empty line:{Colors.RESET}")
+        print()  # blank line so pasted text (including lines starting with #) starts fresh
         lines = []
         try:
             while True:
@@ -1912,7 +1914,8 @@ def commit_translations_only(analyzer: ChangeAnalyzer):
             "# Describe what changed and why.\n"
             "# Lines starting with # are ignored.\n"
             "# Tip: bullet points with - or •, close issues with 'Closes #N'\n"
-            "#\n\n"
+            "#\n"
+            "\n\n"  # two blank lines — cursor starts here, safely below the # block
         )
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
             temp_path = tf.name
@@ -2009,7 +2012,14 @@ def commit_translations_only(analyzer: ChangeAnalyzer):
     try:
         push = input("\nPush to remote? (y/n): ").strip().lower()
         if push in ('y', 'yes'):
-            push_result = analyzer.run_git(["push"])
+            if atomic_git_operation:
+                push_result = atomic_git_operation(
+                    repo_path=analyzer.repo_path,
+                    git_command=["push"],
+                    description="push"
+                )
+            else:
+                push_result = analyzer.run_git(["push"])
             if push_result.returncode == 0:
                 print(f"{Colors.GREEN}✓ Pushed{Colors.RESET}")
             else:
@@ -2184,11 +2194,14 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             # Create temp file with helpful template
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
                 temp_path = tf.name
-                tf.write("# Write your detailed commit message here\n")
-                tf.write("# Lines starting with # will be ignored\n")
-                tf.write("#\n")
-                tf.write("# The auto-generated breakdown will be appended below\n")
-                tf.write("#\n\n")
+                # Blank lines come FIRST — editor opens with cursor on line 1 (empty),
+                # so pasted text lands cleanly without hitting the # instructions.
+                tf.write("\n\n\n")
+                tf.write("# -------------------------------------------------------\n")
+                tf.write("# Write your detailed commit message ABOVE this line.\n")
+                tf.write("# Lines starting with # are ignored.\n")
+                tf.write("# The auto-generated breakdown will be appended after.\n")
+                tf.write("# -------------------------------------------------------\n")
             
             # Detect available editor
             editor = os.environ.get('EDITOR', 'nano')
@@ -2283,15 +2296,13 @@ def interactive_commit(analyzer: ChangeAnalyzer):
     print(f"\n{Colors.BOLD}Final commit message:{Colors.RESET}")
     print(f"{Colors.CYAN}{message}{Colors.RESET}\n")
     
-    # Count total files
+    # Count total files — translations are stashed/ignored so exclude them
     total_files = len(analyzer.changes['code']) + \
                   len(analyzer.changes['tests']) + \
                   len(analyzer.changes['docs']) + \
                   len(analyzer.changes['config']) + \
                   len(analyzer.changes['other']) + \
                   len(analyzer.changes['renames'])
-    for lang_files in analyzer.changes['translations'].values():
-        total_files += len(lang_files)
     
     print(f"Files to commit: {total_files}")
     print()
@@ -2335,8 +2346,18 @@ def interactive_commit(analyzer: ChangeAnalyzer):
             if push in ('y', 'yes'):
                 print(f"\n{Colors.CYAN}Pulling remote changes (rebase)...{Colors.RESET}")
 
-                # Always pull --rebase first to avoid the "fetch first" rejection
-                pull_result = analyzer.run_git(["pull", "--rebase"])
+                # Always pull --rebase first to avoid the "fetch first" rejection.
+                # MUST use atomic_git_operation so ignored files are stashed during
+                # the pull — otherwise the restored unstaged files cause git to refuse.
+                if atomic_git_operation:
+                    pull_result = atomic_git_operation(
+                        repo_path=Path.cwd(),
+                        git_command=["pull", "--rebase"],
+                        description="pull --rebase"
+                    )
+                else:
+                    pull_result = analyzer.run_git(["pull", "--rebase"])
+
                 if pull_result.returncode != 0:
                     print(f"{Colors.YELLOW}⚠ Pull --rebase failed:{Colors.RESET}")
                     print(pull_result.stderr)

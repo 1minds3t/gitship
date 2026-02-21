@@ -33,7 +33,7 @@ dependencies = [
     "filelock",
     "pyperclip",
     "requests",
-    "ruamel",
+    "ruamel.yaml",
     "tomli",
 ]
 

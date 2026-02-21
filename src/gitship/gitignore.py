@@ -182,6 +182,46 @@ def add_common_patterns(repo_path: Path, language: str = 'python'):
             add_to_gitignore(repo_path, pattern, comment)
 
 
+def ensure_self_ignored(repo_path: Path):
+    """Silently ensure gitship's own directories are in .gitignore.
+
+    Called on every CLI startup. No output if already ignored.
+    """
+    patterns_needed = [
+        ('.gitship/',        'gitship internal state (auto-added by gitship)'),
+        ('gitship_exports/', 'gitship diff exports (auto-added by gitship)'),
+    ]
+    gitignore_path = repo_path / '.gitignore'
+    existing = read_gitignore(repo_path)
+
+    added_any = False
+    for pattern, comment in patterns_needed:
+        if pattern not in existing:
+            try:
+                mode = 'a' if gitignore_path.exists() else 'w'
+                with open(gitignore_path, mode, encoding='utf-8') as f:
+                    if mode == 'a':
+                        content = gitignore_path.read_text(encoding='utf-8')
+                        if content and not content.endswith('\n'):
+                            f.write('\n')
+                    f.write(f'\n# {comment}\n')
+                    f.write(f'{pattern}\n')
+                added_any = True
+            except Exception:
+                pass  # Never crash startup over a gitignore write
+
+    if added_any:
+        # Auto-stage .gitignore so the addition is visible in the next commit
+        try:
+            import subprocess
+            subprocess.run(
+                ['git', 'add', '.gitignore'],
+                cwd=repo_path, capture_output=True, check=False
+            )
+        except Exception:
+            pass
+
+
 def main_with_args(repo_path: Path, add: Optional[str] = None, remove: Optional[str] = None, 
                    list_entries: bool = False, common: Optional[str] = None):
     """Entry point for gitignore command."""

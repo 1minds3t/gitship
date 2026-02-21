@@ -338,13 +338,14 @@ def bulk_resolve_all(files: List[str], strategy: str):
         print(f"✓ {filepath}")
 
 def main():
-    # Check if in rebase/merge
+    # Check if in rebase/merge/cherry-pick
     git_dir = Path(".git")
     in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
     in_merge = (git_dir / "MERGE_HEAD").exists()
+    in_cherry_pick = (git_dir / "CHERRY_PICK_HEAD").exists()
     
-    if not in_rebase and not in_merge:
-        print("❌ Not in a rebase or merge state")
+    if not in_rebase and not in_merge and not in_cherry_pick:
+        print("❌ Not in a rebase, merge, or cherry-pick state")
         sys.exit(1)
     
     files = get_conflicted_files()
@@ -353,6 +354,8 @@ def main():
         print("✅ No conflicted files found!")
         if in_rebase:
             print("\nRun: git rebase --continue")
+        elif in_cherry_pick:
+            print("\nRun: git cherry-pick --continue")
         else:
             print("\nRun: git commit")
         sys.exit(0)
@@ -367,7 +370,7 @@ def main():
     print("\n1. INTERACTIVE - Resolve each conflict individually (recommended)")
     print("2. BULK OURS   - Keep ALL local changes (discard remote)")
     print("3. BULK THEIRS - Keep ALL remote changes (discard local)")
-    print("4. ABORT       - Abort the rebase/merge")
+    print("4. ABORT       - Abort the operation")
     
     choice = input("\nChoice (1-4): ").strip()
     
@@ -386,6 +389,8 @@ def main():
             print("\n🎉 All conflicts resolved!")
             if in_rebase:
                 print("\nNext step: git rebase --continue")
+            elif in_cherry_pick:
+                print("\nNext step: git cherry-pick --continue")
             else:
                 print("\nNext step: git commit")
     
@@ -395,6 +400,8 @@ def main():
         print("\n✅ All conflicts resolved with OURS")
         if in_rebase:
             print("Next step: git rebase --continue")
+        elif in_cherry_pick:
+            print("Next step: git cherry-pick --continue")
         else:
             print("Next step: git commit")
     
@@ -404,6 +411,8 @@ def main():
         print("\n✅ All conflicts resolved with THEIRS")
         if in_rebase:
             print("Next step: git rebase --continue")
+        elif in_cherry_pick:
+            print("Next step: git cherry-pick --continue")
         else:
             print("Next step: git commit")
     
@@ -411,6 +420,9 @@ def main():
         if in_rebase:
             run_git(["rebase", "--abort"], check=False)
             print("✓ Rebase aborted")
+        elif in_cherry_pick:
+            run_git(["cherry-pick", "--abort"], check=False)
+            print("✓ Cherry-pick aborted")
         else:
             run_git(["merge", "--abort"], check=False)
             print("✓ Merge aborted")

@@ -14,7 +14,7 @@ from typing import Optional
 
 
 try:
-    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend, init, vscode_history, workflows
+    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend, init, vscode_history
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
@@ -201,16 +201,25 @@ Examples:
 Commands:
   check          - View recent commits, inspect changes, and revert
   fix            - Selectively restore files from commit history
-  review         - Review changes between tags/commits with export options
-  release        - Interactive release creator
   commit         - Smart commit with change analysis
+  review         - Review changes between tags/commits with export options
+  release        - Bump version, changelog, tag and push a release
+  config         - View configuration settings
   branch         - Interactive branch management
   publish        - Publish repository to GitHub
   deps           - Scan and add missing dependencies
-  config         - View configuration settings
+  docs           - Generate or update README.md
+  resolve        - Interactive merge conflict resolver
+  merge          - Merge branches interactively
+  pull           - Pull changes from remote (with rebase)
+  push           - Push changes to remote
+  sync           - Pull and push in one operation
+  amend          - Amend last commit with smart message
+  ignore         - Manage .gitignore entries
+  licenses       - Fetch license files for dependencies
   init           - Initialize or repair a git repository
   vscode-history - Restore files from VSCode local edit history
-  workflows      - GitHub Actions CI workflow manager
+  ci             - CI/CD observability and management (GitHub Actions, GitLab, Jenkins)
         """
     )
     
@@ -304,6 +313,36 @@ Commands:
         help='Show only diff stats, not full commit messages'
     )
     
+    # release subcommand
+    release_parser = subparsers.add_parser(
+        'release',
+        help='Bump version, generate changelog, tag and push a release'
+    )
+    release_parser.add_argument(
+        'bump', nargs='?', choices=['major', 'minor', 'patch'],
+        help='Version bump type (interactive if not specified)'
+    )
+    release_parser.add_argument(
+        '--version', '-V', type=str, metavar='VERSION',
+        help='Set an explicit version string instead of bumping (e.g. 1.4.0)'
+    )
+    release_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Preview what would happen without making any changes'
+    )
+    release_parser.add_argument(
+        '--no-push', action='store_true',
+        help='Tag and commit locally but do not push to remote'
+    )
+    release_parser.add_argument(
+        '--no-tag', action='store_true',
+        help='Bump version and commit but skip creating a git tag'
+    )
+    release_parser.add_argument(
+        '--message', '-m', type=str,
+        help='Custom release/tag message'
+    )
+
     # config subcommand
     config_parser = subparsers.add_parser(
         'config',
@@ -433,7 +472,6 @@ Commands:
     licenses_parser.add_argument('--list', action='store_true', dest='list_licenses',
                                  help='List current license files')
 
-    # workflows subcommand
     # init subcommand
     subparsers.add_parser(
         'init',
@@ -584,7 +622,14 @@ Commands:
         print(f"Error: Not in a git repository: {repo_path}", file=sys.stderr)
         print("Tip: Run 'gitship init' to set up a new repository here.", file=sys.stderr)
         sys.exit(1)
-    
+
+    # Silently keep gitship's own directories out of the repo's history
+    try:
+        from gitship import gitignore as _gitignore
+        _gitignore.ensure_self_ignored(repo_path)
+    except Exception:
+        pass  # Never block the user over this
+
     # Handle commands
     if args.command == 'check':
         check.main_with_args(str(repo_path), count=args.count)
@@ -669,8 +714,27 @@ Commands:
         else:
             merge.main_with_repo(repo_path)
     
+    elif args.command == 'release':
+        import inspect as _inspect
+        _sig = _inspect.signature(release.main_with_repo)
+        _kwargs = {}
+        if 'bump'       in _sig.parameters: _kwargs['bump']       = getattr(args, 'bump', None)
+        if 'version'    in _sig.parameters: _kwargs['version']    = getattr(args, 'version', None)
+        if 'dry_run'    in _sig.parameters: _kwargs['dry_run']    = getattr(args, 'dry_run', False)
+        if 'no_push'    in _sig.parameters: _kwargs['no_push']    = getattr(args, 'no_push', False)
+        if 'no_tag'     in _sig.parameters: _kwargs['no_tag']     = getattr(args, 'no_tag', False)
+        if 'message'    in _sig.parameters: _kwargs['message']    = getattr(args, 'message', None)
+        release.main_with_repo(repo_path, **_kwargs)
+
     elif args.command in ['pull', 'push', 'sync']:
-        sync.main_with_repo(repo_path, args.command)
+        import inspect as _inspect
+        _sig = _inspect.signature(sync.main_with_repo)
+        _kwargs = {}
+        if 'use_merge'    in _sig.parameters: _kwargs['use_merge']    = getattr(args, 'merge', False)
+        if 'force'        in _sig.parameters: _kwargs['force']        = getattr(args, 'force', False)
+        if 'set_upstream' in _sig.parameters: _kwargs['set_upstream'] = getattr(args, 'set_upstream', False)
+        if 'branch'       in _sig.parameters: _kwargs['branch']       = getattr(args, 'branch', None)
+        sync.main_with_repo(repo_path, args.command, **_kwargs)
     
     elif args.command == 'amend':
         amend.main_with_repo(repo_path)
