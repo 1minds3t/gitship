@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-02-21
+
+CI Regression Debugger & Smart Workflow Engine
+
+This release introduces a groundbreaking interactive CI regression debugger and a completely overhauled engine for branch, merge, and cherry-pick operations, making Gitship smarter, safer, and more powerful than ever.
+
+Instantly find what broke your build with the new `gitship ci` regression debugger!
+
+- **Find the Failure:** Automatically identifies the last successful CI run on your current branch and diffs it against HEAD.
+- **Hunk-Level Revert:** Presents each changed code block (hunk) individually, allowing you to interactively revert *only* the specific lines that caused the failure.
+- **Intelligent Contextual Search:** Search for error messages or log lines across all changed files. Gitship finds the line, identifies the enclosing function, and intelligently displays all related hunks, including those in caller functions.
+- **Automated Fix:** Builds and applies a reverse patch for your selected hunks, staging them for a new "fix:" commit, turning hours of debugging into seconds of guided fixing.
+
+The core branching, merging, and cherry-picking logic has been rebuilt for enhanced intelligence and safety.
+
+- **Smart Merge:** Pre-fetches remote status and syncs the target branch *before* merging to prevent common push rejections.
+- **Smart Push:** Automatically detects diverged branches and offers safe resolution options (rebase or force-with-lease) to prevent accidental history overwrites.
+- **Robust Cherry-Pick:** Now handles complex scenarios like resuming stuck operations, automatically skipping merge commits, and gracefully handling sequences of empty/redundant patches. It also offers to amend the final commit with a detailed, auto-generated message.
+- **Safe Branch Deletion:** A new two-step confirmation process (y/n, then type the name) warns you about unmerged commits and remote status, making accidental deletion nearly impossible.
+
+- **Graceful Exits:** Ctrl+C now cancels operations cleanly across all interactive prompts without a messy traceback.
+- **Conflict Resolver:** Now recognizes and can resume in-progress `cherry-pick` conflicts.
+- **Auto-ignore:** Gitship's internal directories (`.gitship/`, `gitship_exports/`) are now automatically added to your project's `.gitignore` on first run.
+- **Dependency Fix:** Correctly identifies `ruamel.yaml` during dependency scans.
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/branch.py (1260 lines changed)
+- UPDATE: src/gitship/ci.py (1238 lines changed)
+- UPDATE: src/gitship/cli.py (82 lines changed)
+- UPDATE: src/gitship/commit.py (47 lines changed)
+- UPDATE: src/gitship/gitignore.py (40 lines changed)
+- UPDATE: src/gitship/merge.py (784 lines changed)
+- UPDATE: src/gitship/resolve_conflicts.py (20 lines changed)
+
+**⚙️ Configuration:**
+- pyproject.toml (2 lines)
+
+_9 files changed, 2716 insertions(+), 763 deletions(-)_
+
 ## [0.4.0] — 2026-02-20
 
 CI Control Plane, Smart Init & History Rescue
