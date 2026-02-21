@@ -457,6 +457,239 @@ def ensure_clean_git_state(repo_path: Path) -> bool:
     return True
 
 
+def has_common_ancestor(repo_path: Path, branch1: str, branch2: str) -> bool:
+    """Return True if branch1 and branch2 share any common commit ancestor."""
+    result = run_git(["merge-base", branch1, branch2], repo_path)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def handle_unrelated_histories(repo_path: Path, source: str, target: str):
+    """
+    Called when source and target share no common ancestor (unrelated histories).
+    This is the 'gitship init created master fresh while main already existed on
+    remote' scenario. Presents three clean options instead of a confusing error.
+    """
+    print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.YELLOW}⚠  UNRELATED HISTORIES DETECTED{Colors.RESET}")
+    print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+    print(f"""
+  {Colors.CYAN}{source}{Colors.RESET} and {Colors.CYAN}{target}{Colors.RESET} have no common commit ancestor.
+  This usually means one branch was created fresh (e.g. via
+  'git init') while the other already had independent history
+  (e.g. an existing remote branch).
+
+  Standard merge is blocked by git to prevent accidentally
+  smashing two unrelated trees together.
+""")
+
+    # Show what's in each branch so user knows what they're choosing between
+    src_log = run_git(["log", "--oneline", "-5", source], repo_path).stdout.strip()
+    tgt_log = run_git(["log", "--oneline", "-5", target], repo_path).stdout.strip()
+
+    print(f"  {Colors.BOLD}Last commits in {Colors.CYAN}{source}{Colors.RESET}{Colors.BOLD}:{Colors.RESET}")
+    for line in (src_log.splitlines() if src_log else ["(no commits)"]):
+        print(f"    {Colors.GREEN}+{Colors.RESET} {line}")
+
+    print(f"\n  {Colors.BOLD}Last commits in {Colors.CYAN}{target}{Colors.RESET}{Colors.BOLD}:{Colors.RESET}")
+    for line in (tgt_log.splitlines() if tgt_log else ["(no commits)"]):
+        print(f"    {Colors.DIM}·{Colors.RESET} {line}")
+
+    print(f"""
+  {Colors.BOLD}OPTIONS:{Colors.RESET}
+
+  {Colors.GREEN}1. Rebase {source} onto {target}{Colors.RESET} {Colors.DIM}(recommended){Colors.RESET}
+     Replays your {source} commits on top of {target}'s history.
+     Result: linear history, {source} commits land cleanly on {target}.
+     Best when: {source} has new work you want to land on {target}.
+
+  {Colors.YELLOW}2. Force merge (--allow-unrelated-histories){Colors.RESET}
+     Joins both histories with a merge commit.
+     Result: both histories preserved, connected by a merge commit.
+     Best when: you genuinely need content from both independent trees.
+
+  {Colors.CYAN}3. Push {source} as a separate branch → open PR on GitHub{Colors.RESET}
+     Leaves both branches independent. Opens a PR so you can
+     review and merge through GitHub's interface instead.
+     Best when: you're not sure and want a second look first.
+
+  {Colors.DIM}0. Cancel{Colors.RESET}
+""")
+
+    choice = input(f"{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
+
+    if choice == "0":
+        print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
+        return
+
+    elif choice == "1":
+        # Rebase source onto target
+        print(f"\n{Colors.BOLD}📐 REBASE: {source} onto {target}{Colors.RESET}")
+        print(f"  This will:")
+        print(f"    1. Switch to {Colors.CYAN}{source}{Colors.RESET}")
+        print(f"    2. Rebase it onto {Colors.CYAN}{target}{Colors.RESET}")
+        print(f"    3. Switch to {Colors.CYAN}{target}{Colors.RESET} and fast-forward merge")
+        print(f"\n  {Colors.YELLOW}Note: rewrites {source} commit SHAs (normal for rebase){Colors.RESET}")
+        confirm = input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
+        if confirm != 'y':
+            print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
+            return
+
+        stashed = stash_ignored_changes(repo_path, f"Before rebase {source} onto {target}")
+
+        # Switch to source
+        print(f"\n  [1/3] Switching to {source}...")
+        res = run_git(["checkout", source], repo_path)
+        if res.returncode != 0:
+            print(f"{Colors.RED}✗ Could not switch to {source}: {res.stderr.strip()}{Colors.RESET}")
+            if stashed:
+                restore_latest_stash(repo_path)
+            return
+
+        # Rebase onto target
+        print(f"  [2/3] Rebasing {source} onto {target}...")
+        res = run_git(["rebase", target], repo_path)
+        if res.returncode != 0:
+            print(f"{Colors.RED}✗ Rebase failed:{Colors.RESET}")
+            print(f"  {res.stderr.strip() or res.stdout.strip()}")
+            print(f"\n  {Colors.YELLOW}To abort the rebase and return to original state:{Colors.RESET}")
+            print(f"    git rebase --abort")
+            if stashed:
+                print(f"\n  {Colors.MAGENTA}📦 Your stash is still saved. Run 'git stash pop' after aborting.{Colors.RESET}")
+            return
+
+        # Fast-forward target
+        print(f"  [3/3] Fast-forwarding {target}...")
+        res = run_git(["checkout", target], repo_path)
+        if res.returncode == 0:
+            res = run_git(["merge", "--ff-only", source], repo_path)
+            if res.returncode == 0:
+                print(f"\n{Colors.GREEN}✅ Rebase complete! {target} is now up to date with {source}'s commits.{Colors.RESET}")
+                if stashed:
+                    restore_latest_stash(repo_path)
+                _offer_push_after_unrelated(repo_path, target, source)
+            else:
+                print(f"{Colors.RED}✗ Fast-forward failed: {res.stderr.strip()}{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Could not switch to {target}{Colors.RESET}")
+
+    elif choice == "2":
+        # Force merge with --allow-unrelated-histories
+        print(f"\n{Colors.BOLD}🔀 FORCE MERGE: {source} → {target} (unrelated histories){Colors.RESET}")
+        print(f"  {Colors.YELLOW}This joins two independent trees into one with a merge commit.{Colors.RESET}")
+        print(f"  Both histories will be preserved.")
+        confirm = input(f"\n  {Colors.YELLOW}Continue? (y/n):{Colors.RESET} ").strip().lower()
+        if confirm != 'y':
+            print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
+            return
+
+        stashed = stash_ignored_changes(repo_path, f"Before force-merge {source} into {target}")
+
+        print(f"\n  [1/2] Switching to {target}...")
+        res = run_git(["checkout", target], repo_path)
+        if res.returncode != 0:
+            print(f"{Colors.RED}✗ Could not switch to {target}: {res.stderr.strip()}{Colors.RESET}")
+            if stashed:
+                restore_latest_stash(repo_path)
+            return
+
+        print(f"  [2/2] Merging {source} (allowing unrelated histories)...")
+        msg = f"Merge unrelated branch '{source}' into '{target}'"
+        res = run_git(["merge", "--allow-unrelated-histories", "--no-ff", "-m", msg, source], repo_path)
+
+        if res.returncode == 0:
+            print(f"\n{Colors.GREEN}✅ Merge complete!{Colors.RESET}")
+            if stashed:
+                restore_latest_stash(repo_path)
+            _offer_push_after_unrelated(repo_path, target, source)
+        else:
+            # Conflicts during unrelated merge are common (both have README, .gitignore etc.)
+            print(f"\n{Colors.YELLOW}⚠️  Merge has conflicts (common when joining unrelated trees).{Colors.RESET}")
+            print(f"  Files that need manual resolution:")
+            conflicts = run_git(["diff", "--name-only", "--diff-filter=U"], repo_path)
+            for f in conflicts.stdout.strip().splitlines():
+                print(f"    {Colors.RED}✗{Colors.RESET} {f}")
+            print(f"""
+  To resolve:
+    1. Edit the conflicted files (look for <<<<<<< markers)
+    2. {Colors.CYAN}git add .{Colors.RESET}
+    3. {Colors.CYAN}git commit{Colors.RESET}
+
+  To abort and go back:
+    {Colors.CYAN}git merge --abort{Colors.RESET}
+""")
+
+    elif choice == "3":
+        # Push source as separate branch, show PR link
+        print(f"\n{Colors.BOLD}🚀 PUSH {source} → remote as separate branch{Colors.RESET}")
+        confirm = input(f"  Push '{source}' to origin/{source}? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
+            return
+
+        res = run_git(["push", "-u", "origin", source], repo_path)
+        if res.returncode == 0:
+            print(f"{Colors.GREEN}✓ Pushed '{source}' to remote.{Colors.RESET}")
+            # Try to infer GitHub PR URL from remote
+            remote_url = run_git(["remote", "get-url", "origin"], repo_path).stdout.strip()
+            pr_url = _github_pr_url(remote_url, source, target)
+            if pr_url:
+                print(f"\n  {Colors.CYAN}Open a PR here:{Colors.RESET}")
+                print(f"  {Colors.BRIGHT_BLUE}{pr_url}{Colors.RESET}")
+            else:
+                print(f"\n  Open a Pull Request on your git host to merge '{source}' into '{target}'.")
+        else:
+            print(f"{Colors.RED}✗ Push failed: {res.stderr.strip()}{Colors.RESET}")
+
+    else:
+        print(f"{Colors.RED}Invalid choice.{Colors.RESET}")
+
+
+def _offer_push_after_unrelated(repo_path: Path, target: str, source: str):
+    """After a successful unrelated-history resolution, offer to push and clean up."""
+    push = input(f"\n{Colors.CYAN}🚀 Push {target} to remote now? (y/n):{Colors.RESET} ").strip().lower()
+    if push == 'y':
+        res = run_git(["push", "origin", target], repo_path)
+        if res.returncode == 0:
+            print(f"{Colors.GREEN}✓ Pushed origin/{target}{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Push failed: {res.stderr.strip()}{Colors.RESET}")
+
+    # Offer to delete the now-redundant source branch
+    delete = input(f"\n  Delete local branch '{source}' now? (y/n): ").strip().lower()
+    if delete == 'y':
+        current = get_current_branch(repo_path)
+        if current == source:
+            run_git(["checkout", target], repo_path)
+        res = run_git(["branch", "-d", source], repo_path)
+        if res.returncode == 0:
+            print(f"{Colors.GREEN}✓ Deleted local branch '{source}'{Colors.RESET}")
+        else:
+            # -d refuses if not fully merged; offer -D
+            res2 = run_git(["branch", "-D", source], repo_path)
+            if res2.returncode == 0:
+                print(f"{Colors.GREEN}✓ Deleted local branch '{source}' (force){Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}⚠️  Could not delete '{source}': {res2.stderr.strip()}{Colors.RESET}")
+
+
+def _github_pr_url(remote_url: str, source: str, target: str) -> str:
+    """
+    Try to construct a GitHub PR URL from a remote URL.
+    Handles https://github.com/... and git@github.com:... formats.
+    Returns empty string if not a GitHub remote.
+    """
+    import re
+    # SSH: git@github.com:owner/repo.git or git@github-alias:owner/repo.git
+    ssh_match = re.match(r"git@[^:]+:([^/]+/[^.]+)(?:\.git)?$", remote_url)
+    if ssh_match:
+        return f"https://github.com/{ssh_match.group(1)}/compare/{target}...{source}?expand=1"
+    # HTTPS: https://github.com/owner/repo.git
+    https_match = re.match(r"https://github\.com/([^/]+/[^.]+?)(?:\.git)?$", remote_url)
+    if https_match:
+        return f"https://github.com/{https_match.group(1)}/compare/{target}...{source}?expand=1"
+    return ""
+
+
 
 
 # =============================================================================
@@ -476,6 +709,13 @@ def merge_branches_interactive(repo_path: Path, source: str, target: str):
         print("Cancelled")
         return
     
+    # Detect unrelated histories before doing anything destructive
+    if not has_common_ancestor(repo_path, source, target):
+        print(f"\n{Colors.YELLOW}⚠️  Cannot proceed: {source} and {target} have no common ancestor.{Colors.RESET}")
+        print(f"   Switching to unrelated-histories handler...\n")
+        handle_unrelated_histories(repo_path, source=source, target=target)
+        return
+
     # 0. Atomic Stash
     stashed = stash_ignored_changes(repo_path, f"Before merge {source} into {target}")
 
@@ -643,6 +883,29 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     if not incoming_list:
         print(f"✅ {Colors.GREEN}Already merged{Colors.RESET} or nothing to apply.")
     else:
+        # Detect unrelated histories BEFORE trying merge-base (which will fail)
+        if not has_common_ancestor(repo_path, source, target):
+            print(f"{Colors.YELLOW}⚠️  UNRELATED HISTORIES — no common ancestor found.{Colors.RESET}")
+            print(f"   Standard merge is not possible. See options below.\n")
+            print(f"\n{Colors.BOLD}ACTIONS:{Colors.RESET}")
+            print(f"  1. Resolve unrelated histories ({Colors.CYAN}rebase / force-merge / PR{Colors.RESET})")
+            print(f"  2. View full diff (content changes)")
+            print(f"  3. Swap Source/Target")
+            print(f"  0. Back")
+            choice = input(f"\n{Colors.BLUE}Choice (0-3):{Colors.RESET} ").strip()
+            if choice == "1":
+                handle_unrelated_histories(repo_path, source=source, target=target)
+            elif choice == "2":
+                diff_result = run_git(["diff", source, target], repo_path)
+                lines = diff_result.stdout.splitlines()
+                for line in lines[:80]:
+                    print(f"  {line}")
+                if len(lines) > 80:
+                    print(f"  ... ({len(lines) - 80} more lines)")
+            elif choice == "3":
+                compare_branches_simple(repo_path, source=target, target=source)
+            return
+
         # Check for conflicts by looking for overlapping file changes since merge base
         mb_res = run_git(["merge-base", source, target], repo_path)
         merge_base = mb_res.stdout.strip()

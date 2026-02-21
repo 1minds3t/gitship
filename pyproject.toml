@@ -30,8 +30,10 @@ classifiers = [
 ]
 
 dependencies = [
+    "filelock",
     "pyperclip",
     "requests",
+    "ruamel",
     "tomli",
 ]
 

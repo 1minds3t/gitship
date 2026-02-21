@@ -2333,22 +2333,33 @@ def interactive_commit(analyzer: ChangeAnalyzer):
         try:
             push = input("\nPush to remote? (y/n): ").strip().lower()
             if push in ('y', 'yes'):
-                print(f"\n{Colors.CYAN}Pushing to remote...{Colors.RESET}")
-                
-                # Use atomic operation for push too
-                if atomic_git_operation:
-                    push_result = atomic_git_operation(
-                        repo_path=Path.cwd(),
-                        git_command=["push"],
-                        description="push"
-                    )
+                print(f"\n{Colors.CYAN}Pulling remote changes (rebase)...{Colors.RESET}")
+
+                # Always pull --rebase first to avoid the "fetch first" rejection
+                pull_result = analyzer.run_git(["pull", "--rebase"])
+                if pull_result.returncode != 0:
+                    print(f"{Colors.YELLOW}⚠ Pull --rebase failed:{Colors.RESET}")
+                    print(pull_result.stderr)
+                    print(f"{Colors.YELLOW}Resolve conflicts, then push manually with: git push{Colors.RESET}")
                 else:
-                    push_result = analyzer.run_git(["push"])
-                
-                if push_result.returncode == 0:
-                    print(f"{Colors.GREEN}✓ Pushed to remote{Colors.RESET}")
-                else:
-                    print(f"{Colors.YELLOW}⚠ Push failed: {push_result.stderr}{Colors.RESET}")
+                    if pull_result.stdout.strip():
+                        print(pull_result.stdout.strip())
+
+                    print(f"{Colors.CYAN}Pushing to remote...{Colors.RESET}")
+
+                    if atomic_git_operation:
+                        push_result = atomic_git_operation(
+                            repo_path=Path.cwd(),
+                            git_command=["push"],
+                            description="push"
+                        )
+                    else:
+                        push_result = analyzer.run_git(["push"])
+
+                    if push_result.returncode == 0:
+                        print(f"{Colors.GREEN}✓ Pushed to remote{Colors.RESET}")
+                    else:
+                        print(f"{Colors.YELLOW}⚠ Push failed: {push_result.stderr}{Colors.RESET}")
         except KeyboardInterrupt:
             print("\n\nPush skipped.")
         

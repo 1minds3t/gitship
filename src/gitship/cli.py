@@ -8,12 +8,13 @@ for various git operations.
 
 import argparse
 import sys
+import textwrap
 from pathlib import Path
 from typing import Optional
 
 
 try:
-    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend
+    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend, init, vscode_history, workflows
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
@@ -30,29 +31,32 @@ def show_menu(repo_path: Path):
     print(f"Repository: {repo_path}")
     print()
     print("Available Commands:")
-    print("  1. check    - View recent commits and inspect changes")
-    print("  2. fix      - Selectively restore files from commit history")
-    print("  3. commit   - Smart commit with change analysis")
-    print("  4. review   - Review changes between tags/commits with export")
-    print("  5. release  - Bump version, changelog, and push release")
-    print("  6. config   - View/edit gitship configuration")
-    print("  7. branch   - Manage branches (create, switch, rename, set default)")
-    print("  8. publish  - Create GitHub repo and push (with identity verification)")
-    print("  9. deps     - Scan for and add missing dependencies to pyproject.toml")
-    print("  10. docs    - Generate or update README.md")
-    print("  11. resolve - Interactive merge conflict resolver")
-    print("  12. merge   - Merge branches interactively")
-    print("  13. pull    - Pull changes from remote (with rebase)")
-    print("  14. push    - Push changes to remote")
-    print("  15. sync    - Pull and push in one operation")
-    print("  16. amend   - Amend last commit with smart message")
-    print("  17. ignore  - Manage .gitignore entries")
-    print("  18. licenses - Fetch license files for dependencies")
-    print("  0. exit     - Exit gitship")
+    print("  1. check         - View recent commits and inspect changes")
+    print("  2. fix           - Selectively restore files from commit history")
+    print("  3. commit        - Smart commit with change analysis")
+    print("  4. review        - Review changes between tags/commits with export")
+    print("  5. release       - Bump version, changelog, and push release")
+    print("  6. config        - View/edit gitship configuration")
+    print("  7. branch        - Manage branches (create, switch, rename, set default)")
+    print("  8. publish       - Create GitHub repo and push (with identity verification)")
+    print("  9. deps          - Scan for and add missing dependencies to pyproject.toml")
+    print("  10. docs         - Generate or update README.md")
+    print("  11. resolve      - Interactive merge conflict resolver")
+    print("  12. merge        - Merge branches interactively")
+    print("  13. pull         - Pull changes from remote (with rebase)")
+    print("  14. push         - Push changes to remote")
+    print("  15. sync         - Pull and push in one operation")
+    print("  16. amend        - Amend last commit with smart message")
+    print("  17. ignore       - Manage .gitignore entries")
+    print("  18. licenses     - Fetch license files for dependencies")
+    print("  19. init         - Initialize a new git repository")
+    print("  20. vscode-history - Restore files from VSCode local history")
+    print("  21. ci           - GitHub Actions: observe, create, edit, trigger workflows")
+    print("  0. exit          - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-18): ").strip()
+        choice = input("Enter your choice (0-21): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -158,6 +162,15 @@ def show_menu(repo_path: Path):
     elif choice == "18":
         from gitship import licenses
         licenses.interactive_licenses(repo_path)
+    elif choice == "19":
+        from gitship import init
+        init.main_with_repo(repo_path)
+    elif choice == "20":
+        from gitship import vscode_history
+        vscode_history.main_with_repo(repo_path)
+    elif choice == "21":
+        from gitship import ci
+        ci.main_with_repo(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -181,17 +194,23 @@ Examples:
   gitship review --from v1.0.0 --to v2.0.0  # Review changes between tags
   gitship review --export          # Export full diff to file
   gitship -r ~/myproject check     # Run check in specific repo
+  gitship vscode-history           # Restore files from VSCode local history
+  gitship vscode-history --list    # List files with available history
+  gitship vscode-history --dry-run # Preview what would be restored
 
 Commands:
-  check      - View recent commits, inspect changes, and revert
-  fix        - Selectively restore files from commit history
-  review     - Review changes between tags/commits with export options
-  release    - Interactive release creator
-  commit     - Smart commit with change analysis
-  branch     - Interactive branch management
-  publish    - Publish repository to GitHub
-  deps       - Scan and add missing dependencies
-  config     - View configuration settings
+  check          - View recent commits, inspect changes, and revert
+  fix            - Selectively restore files from commit history
+  review         - Review changes between tags/commits with export options
+  release        - Interactive release creator
+  commit         - Smart commit with change analysis
+  branch         - Interactive branch management
+  publish        - Publish repository to GitHub
+  deps           - Scan and add missing dependencies
+  config         - View configuration settings
+  init           - Initialize or repair a git repository
+  vscode-history - Restore files from VSCode local edit history
+  workflows      - GitHub Actions CI workflow manager
         """
     )
     
@@ -211,13 +230,13 @@ Commands:
     parser.add_argument(
         '-v', '--version',
         action='version',
-        version='gitship 0.3.0'  # Updated from 0.2.0
+        version='gitship 0.3.0'
     )
     
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
         
-        # check subcommand
+    # check subcommand
     check_parser = subparsers.add_parser(
         'check',
         help='View recent commits and inspect changes'
@@ -239,6 +258,8 @@ Commands:
         nargs='?',
         help='Commit SHA to restore files from (before this commit)'
     )
+
+    # commit subcommand
     commit_parser = subparsers.add_parser(
         'commit',
         help='Smart commit with change analysis'
@@ -248,6 +269,7 @@ Commands:
         type=str,
         help='Commit message (skip interactive prompt)'
     )
+
     # review subcommand
     review_parser = subparsers.add_parser(
         'review',
@@ -309,241 +331,214 @@ Commands:
         choices=['list', 'create', 'switch', 'rename', 'delete', 'set-default'],
         help='Branch operation to perform'
     )
-    branch_parser.add_argument(
-        '--name',
-        type=str,
-        help='Branch name for create/switch/delete operations'
-    )
-    branch_parser.add_argument(
-        '--from',
-        dest='from_ref',
-        type=str,
-        help='Starting point for new branch (create operation)'
-    )
-    branch_parser.add_argument(
-        '--old-name',
-        type=str,
-        help='Old branch name (rename operation)'
-    )
-    branch_parser.add_argument(
-        '--new-name',
-        type=str,
-        help='New branch name (rename operation)'
-    )
-    branch_parser.add_argument(
-        '--force',
-        action='store_true',
-        help='Force delete unmerged branch'
-    )
-    branch_parser.add_argument(
-        '--remote',
-        action='store_true',
-        help='Also update remote (for rename/set-default)'
-    )
-    branch_parser.add_argument(
-        '--switch',
-        action='store_true',
-        help='Switch to branch after creating'
-    )
-    branch_parser.add_argument(
-        '--show-remote',
-        action='store_true',
-        help='Show remote branches (list operation)'
-    )
+    branch_parser.add_argument('--name', type=str, help='Branch name')
+    branch_parser.add_argument('--from', dest='from_ref', type=str,
+                               help='Starting point for new branch')
+    branch_parser.add_argument('--old-name', type=str, help='Old branch name (rename)')
+    branch_parser.add_argument('--new-name', type=str, help='New branch name (rename)')
+    branch_parser.add_argument('--force', action='store_true',
+                               help='Force delete unmerged branch')
+    branch_parser.add_argument('--remote', action='store_true',
+                               help='Also update remote (rename/set-default)')
+    branch_parser.add_argument('--switch', action='store_true',
+                               help='Switch to branch after creating')
+    branch_parser.add_argument('--show-remote', action='store_true',
+                               help='Show remote branches (list)')
+
     # publish subcommand
     publish_parser = subparsers.add_parser(
         'publish',
         help='Publish repository to GitHub with identity verification'
     )
-    publish_parser.add_argument(
-        '--name',
-        type=str,
-        help='Repository name (default: directory name)'
-    )
-    publish_parser.add_argument(
-        '--description',
-        type=str,
-        help='Repository description'
-    )
-    publish_parser.add_argument(
-        '--private',
-        action='store_true',
-        help='Create private repository (default: public)'
-    )
-    publish_parser.add_argument(
-        '--identity',
-        type=str,
-        help='GitHub username to publish as (skip interactive selection)'
-    )
+    publish_parser.add_argument('--name', type=str,
+                                help='Repository name (default: directory name)')
+    publish_parser.add_argument('--description', type=str,
+                                help='Repository description')
+    publish_parser.add_argument('--private', action='store_true',
+                                help='Create private repository (default: public)')
+    publish_parser.add_argument('--identity', type=str,
+                                help='GitHub username to publish as')
+
     # deps subcommand
     deps_parser = subparsers.add_parser(
         'deps',
         help='Scan for and add missing dependencies to pyproject.toml'
     )
-    deps_parser.add_argument(
-        '--list-ignored',
-        action='store_true',
-        help='List packages in permanent ignore list for this project'
-    )
-    deps_parser.add_argument(
-        '--add-ignore',
-        type=str,
-        metavar='PACKAGE',
-        help='Add a package to permanent ignore list'
-    )
-    deps_parser.add_argument(
-        '--remove-ignore',
-        type=str,
-        metavar='PACKAGE',
-        help='Remove a package from permanent ignore list'
-    )
+    deps_parser.add_argument('--list-ignored', action='store_true',
+                             help='List packages in permanent ignore list')
+    deps_parser.add_argument('--add-ignore', type=str, metavar='PACKAGE',
+                             help='Add a package to permanent ignore list')
+    deps_parser.add_argument('--remove-ignore', type=str, metavar='PACKAGE',
+                             help='Remove a package from permanent ignore list')
+
     # docs subcommand
-    docs_parser = subparsers.add_parser(
-        'docs',
-        help='Manage documentation/README'
-    )
-    docs_parser.add_argument(
-        '--edit',
-        action='store_true',
-        help='Interactive section-by-section README editor'
-    )
-    docs_parser.add_argument(
-        '--generate',
-        action='store_true',
-        help='Generate default README with current features'
-    )
-    docs_parser.add_argument(
-        '--source',
-        type=str,
-        help='Update README from source file'
-    )
+    docs_parser = subparsers.add_parser('docs', help='Manage documentation/README')
+    docs_parser.add_argument('--edit', action='store_true',
+                             help='Interactive section-by-section README editor')
+    docs_parser.add_argument('--generate', action='store_true',
+                             help='Generate default README with current features')
+    docs_parser.add_argument('--source', type=str, help='Update README from source file')
     
     # resolve subcommand
-    resolve_parser = subparsers.add_parser(
-        'resolve',
-        help='Interactive merge conflict resolver'
-    )
+    subparsers.add_parser('resolve', help='Interactive merge conflict resolver')
     
     # merge subcommand
-    merge_parser = subparsers.add_parser(
-        'merge',
-        help='Merge branches interactively'
-    )
-    merge_parser.add_argument(
-        'branch',
-        nargs='?',
-        help='Branch to merge (interactive if not specified)'
-    )
-    merge_parser.add_argument(
-        '--strategy',
-        choices=['ours', 'theirs'],
-        help='Merge strategy for conflicts'
-    )
-    merge_parser.add_argument(
-        '--no-commit',
-        action='store_true',
-        help='Merge but do not auto-commit'
-    )
+    merge_parser = subparsers.add_parser('merge', help='Merge branches interactively')
+    merge_parser.add_argument('branch', nargs='?',
+                              help='Branch to merge (interactive if not specified)')
+    merge_parser.add_argument('--strategy', choices=['ours', 'theirs'],
+                              help='Merge strategy for conflicts')
+    merge_parser.add_argument('--no-commit', action='store_true',
+                              help='Merge but do not auto-commit')
     
-    # Pull command
-    pull_parser = subparsers.add_parser(
-        'pull',
-        help='Pull changes from remote (with rebase)'
-    )
-    pull_parser.add_argument(
-        '--merge',
-        action='store_true',
-        help='Use merge instead of rebase'
-    )
-    pull_parser.add_argument(
-        '--branch',
-        help='Specific branch to pull'
-    )
+    # pull subcommand
+    pull_parser = subparsers.add_parser('pull', help='Pull changes from remote (with rebase)')
+    pull_parser.add_argument('--merge', action='store_true',
+                             help='Use merge instead of rebase')
+    pull_parser.add_argument('--branch', help='Specific branch to pull')
     
-    # Push command
-    push_parser = subparsers.add_parser(
-        'push',
-        help='Push changes to remote'
-    )
-    push_parser.add_argument(
-        '--force',
-        action='store_true',
-        help='Force push (use with caution!)'
-    )
-    push_parser.add_argument(
-        '--set-upstream',
-        action='store_true',
-        help='Set upstream tracking branch'
-    )
+    # push subcommand
+    push_parser = subparsers.add_parser('push', help='Push changes to remote')
+    push_parser.add_argument('--force', action='store_true',
+                             help='Force push (use with caution!)')
+    push_parser.add_argument('--set-upstream', action='store_true',
+                             help='Set upstream tracking branch')
     
-    # Sync command
-    sync_parser = subparsers.add_parser(
-        'sync',
-        help='Pull and push in one operation'
-    )
-    sync_parser.add_argument(
-        '--merge',
-        action='store_true',
-        help='Use merge instead of rebase for pull'
-    )
+    # sync subcommand
+    sync_parser = subparsers.add_parser('sync', help='Pull and push in one operation')
+    sync_parser.add_argument('--merge', action='store_true',
+                             help='Use merge instead of rebase for pull')
     
-    # Amend command
-    amend_parser = subparsers.add_parser(
-        'amend',
-        help='Amend last commit with smart message generation'
-    )
-    amend_parser.add_argument(
-        '--auto',
-        action='store_true',
-        help='Automatically use smart message without prompting'
-    )
+    # amend subcommand
+    amend_parser = subparsers.add_parser('amend', help='Amend last commit with smart message generation')
+    amend_parser.add_argument('--auto', action='store_true',
+                              help='Automatically use smart message without prompting')
     
     # ignore subcommand
-    ignore_parser = subparsers.add_parser(
-        'ignore',
-        help='Manage .gitignore entries'
-    )
-    ignore_parser.add_argument(
-        '--add',
-        type=str,
-        metavar='PATTERN',
-        help='Add pattern to .gitignore'
-    )
-    ignore_parser.add_argument(
-        '--remove',
-        type=str,
-        metavar='PATTERN',
-        help='Remove pattern from .gitignore'
-    )
-    ignore_parser.add_argument(
-        '--list',
-        action='store_true',
-        dest='list_ignore',
-        help='List current .gitignore entries'
-    )
-    ignore_parser.add_argument(
-        '--common',
-        type=str,
-        choices=['python', 'node'],
-        help='Add common patterns for language (python/node)'
-    )
+    ignore_parser = subparsers.add_parser('ignore', help='Manage .gitignore entries')
+    ignore_parser.add_argument('--add', type=str, metavar='PATTERN',
+                               help='Add pattern to .gitignore')
+    ignore_parser.add_argument('--remove', type=str, metavar='PATTERN',
+                               help='Remove pattern from .gitignore')
+    ignore_parser.add_argument('--list', action='store_true', dest='list_ignore',
+                               help='List current .gitignore entries')
+    ignore_parser.add_argument('--common', type=str, choices=['python', 'node'],
+                               help='Add common patterns for language')
     
     # licenses subcommand
-    licenses_parser = subparsers.add_parser(
-        'licenses',
-        help='Fetch license files for project dependencies'
+    licenses_parser = subparsers.add_parser('licenses',
+                                            help='Fetch license files for project dependencies')
+    licenses_parser.add_argument('--fetch', action='store_true',
+                                 help='Fetch licenses for all dependencies in pyproject.toml')
+    licenses_parser.add_argument('--list', action='store_true', dest='list_licenses',
+                                 help='List current license files')
+
+    # workflows subcommand
+    # init subcommand
+    subparsers.add_parser(
+        'init',
+        help='Initialize a new git repository (or repair a corrupted one)'
     )
-    licenses_parser.add_argument(
-        '--fetch',
-        action='store_true',
-        help='Fetch licenses for all dependencies in pyproject.toml'
+
+    # vscode-history subcommand
+    vsc_parser = subparsers.add_parser(
+        'vscode-history',
+        help='Restore files from VSCode local edit history'
     )
-    licenses_parser.add_argument(
-        '--list',
-        action='store_true',
-        dest='list_licenses',
-        help='List current license files'
+    vsc_parser.add_argument(
+        'directory', nargs='?', default=None,
+        help='Directory to restore (default: current repo or working directory)'
     )
+    vsc_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Show what would be restored without writing anything'
+    )
+    vsc_parser.add_argument(
+        '--list', action='store_true', dest='list_history',
+        help='List files with available VSCode history and exit'
+    )
+    vsc_parser.add_argument(
+        '--no-backup', action='store_true',
+        help="Don't create .bak files before overwriting"
+    )
+
+    # ci subcommand
+    ci_parser = subparsers.add_parser(
+        'ci',
+        help='GitHub Actions workflow observability and management',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=textwrap.dedent("""\
+            GitHub Actions CI — observe, create, trigger and manage workflows.
+
+            Observability:
+              gitship ci                         # Interactive CI menu
+              gitship ci --overview              # All workflows + stats
+              gitship ci --runs                  # Recent runs (all)
+              gitship ci --runs --workflow NAME  # Runs for one workflow
+              gitship ci --events                # Event → workflow map
+              gitship ci --errors RUN_ID         # Failure logs for a run
+
+            Actions:
+              gitship ci --trigger NAME          # Dispatch a workflow
+              gitship ci --trigger NAME --branch develop
+              gitship ci --rerun RUN_ID          # Rerun failed jobs
+              gitship ci --rerun RUN_ID --all    # Rerun all jobs
+              gitship ci --cancel RUN_ID         # Cancel a run
+
+            Manage workflow files:
+              gitship ci --create                # Create from template
+              gitship ci --create --template python-test --filename test.yml
+              gitship ci --edit                  # Edit in $EDITOR
+              gitship ci --edit --filename test.yml
+              gitship ci --delete --filename old.yml
+              gitship ci --triggers              # Edit events/cron
+              gitship ci --triggers --filename ci.yml
+
+            Templates: python-test, python-lint, release-pypi,
+                       scheduled-job, docker-build, blank
+        """),
+    )
+    # Observability flags
+    ci_parser.add_argument('--overview', action='store_true',
+                           help='Show all workflows with run stats')
+    ci_parser.add_argument('--runs', action='store_true',
+                           help='Show recent workflow runs')
+    ci_parser.add_argument('--events', action='store_true',
+                           help='Show event → workflow map')
+    ci_parser.add_argument('--errors', metavar='RUN_ID',
+                           help='Show failure logs for a run ID')
+    ci_parser.add_argument('--workflow', metavar='NAME',
+                           help='Filter runs by workflow name')
+    ci_parser.add_argument('--limit', type=int, default=20, metavar='N',
+                           help='Number of runs to show (default: 20)')
+    # Action flags
+    ci_parser.add_argument('--trigger', metavar='WORKFLOW',
+                           help='Manually dispatch a workflow (needs workflow_dispatch trigger)')
+    ci_parser.add_argument('--rerun', metavar='RUN_ID',
+                           help='Rerun failed jobs in a run (add --all for all jobs)')
+    ci_parser.add_argument('--all', dest='rerun_all', action='store_true',
+                           help='Rerun all jobs (use with --rerun)')
+    ci_parser.add_argument('--cancel', metavar='RUN_ID',
+                           help='Cancel an in-progress run')
+    ci_parser.add_argument('--branch', default='main',
+                           help='Branch to use when triggering (default: main)')
+    # File management flags
+    ci_parser.add_argument('--create', action='store_true',
+                           help='Create a new workflow file from template')
+    ci_parser.add_argument('--template', metavar='NAME',
+                           help='Template to use with --create')
+    ci_parser.add_argument('--filename', metavar='FILE',
+                           help='Workflow filename for --create/--edit/--delete/--triggers')
+    ci_parser.add_argument('--edit', action='store_true',
+                           help='Edit a workflow file in $EDITOR')
+    ci_parser.add_argument('--delete', action='store_true',
+                           help='Delete a workflow file')
+    ci_parser.add_argument('--triggers', action='store_true',
+                           help='Edit trigger events / cron schedule for a workflow')
+    ci_parser.add_argument('--dry-run', action='store_true', dest='ci_dry_run',
+                           help='Preview changes as a diff without writing any files')
+    ci_parser.add_argument('--json', action='store_true', dest='ci_json',
+                           help='Output results as JSON (for overview, runs, events, errors)')
 
     args = parser.parse_args()
     
@@ -552,10 +547,42 @@ Commands:
         repo_path = Path(args.repo).resolve()
     else:
         repo_path = Path.cwd()
-    
-    # Validate repository
+
+    # ── Commands that bypass the git-repo check ────────────────────────────────
+
+    if args.command == 'init':
+        from gitship import init
+        init.main_with_repo(repo_path)
+        return
+
+    if args.command == 'vscode-history':
+        from gitship import vscode_history
+        target = Path(args.directory).resolve() if args.directory else repo_path
+
+        restorer = vscode_history.VSCodeHistory(target_dir=target)
+        restorer.scan()
+
+        if args.list_history:
+            if not restorer.file_versions:
+                print("  No VSCode history found for this directory.")
+                return
+            print()
+            for rel_path, versions in sorted(restorer.file_versions.items()):
+                latest = versions[0]["datetime"].strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  📄 {rel_path}  ({len(versions)} versions, latest: {latest})")
+            return
+
+        restorer.interactive_restore(
+            backup=not args.no_backup,
+            dry_run=args.dry_run,
+        )
+        return
+
+    # ── All other commands require a valid git repo ────────────────────────────
+
     if not check.is_git_repo(repo_path):
         print(f"Error: Not in a git repository: {repo_path}", file=sys.stderr)
+        print("Tip: Run 'gitship init' to set up a new repository here.", file=sys.stderr)
         sys.exit(1)
     
     # Handle commands
@@ -587,6 +614,7 @@ Commands:
             set_export_path(args.set_export_path)
         else:
             show_config()
+
     elif args.command == 'branch':
         from gitship import branch
         if args.operation:
@@ -603,15 +631,17 @@ Commands:
                 show_remote=args.show_remote
             )
         else:
-            # No operation, show interactive menu
             branch.main_with_repo(repo_path)
+
     elif args.command == 'publish':
         from gitship import publish
         publish.publish_repository(repo_path)
+
     elif args.command == 'deps':
         from gitship import deps
-        from gitship.config import list_ignored_dependencies_for_project, add_ignored_dependency, remove_ignored_dependency
-        
+        from gitship.config import (list_ignored_dependencies_for_project,
+                                    add_ignored_dependency,
+                                    remove_ignored_dependency)
         if args.list_ignored:
             list_ignored_dependencies_for_project(repo_path)
         elif args.add_ignore:
@@ -621,9 +651,11 @@ Commands:
             remove_ignored_dependency(args.remove_ignore, repo_path)
         else:
             deps.main_with_repo(repo_path)
+
     elif args.command == 'docs':
         from gitship import docs
-        docs.main_with_args(repo_path, source=args.source, generate=args.generate, edit=args.edit)
+        docs.main_with_args(repo_path, source=args.source,
+                            generate=args.generate, edit=args.edit)
     
     elif args.command == 'resolve':
         from gitship import resolve_conflicts
@@ -632,11 +664,9 @@ Commands:
     elif args.command == 'merge':
         from gitship import merge
         if args.branch:
-            # Direct merge
             strategy = args.strategy if hasattr(args, 'strategy') else None
             merge.merge_branch(repo_path, args.branch, strategy)
         else:
-            # Interactive
             merge.main_with_repo(repo_path)
     
     elif args.command in ['pull', 'push', 'sync']:
@@ -648,8 +678,8 @@ Commands:
     elif args.command == 'ignore':
         from gitship import gitignore
         gitignore.main_with_args(
-            repo_path, 
-            add=args.add, 
+            repo_path,
+            add=args.add,
             remove=args.remove,
             list_entries=args.list_ignore,
             common=args.common
@@ -661,6 +691,31 @@ Commands:
             repo_path,
             fetch=args.fetch,
             list_files=args.list_licenses
+        )
+
+    elif args.command == 'ci':
+        from gitship import ci
+        ci.main_with_args(
+            repo_path,
+            overview=args.overview,
+            runs=args.runs,
+            events=args.events,
+            errors=args.errors,
+            workflow=args.workflow,
+            limit=args.limit,
+            trigger=args.trigger,
+            rerun=args.rerun,
+            rerun_all_flag=args.rerun_all,
+            cancel=args.cancel,
+            branch=args.branch,
+            create=args.create,
+            template=args.template,
+            filename=args.filename,
+            edit=args.edit,
+            delete=args.delete,
+            triggers=args.triggers,
+            dry_run=args.ci_dry_run,
+            as_json=args.ci_json,
         )
         
     else:

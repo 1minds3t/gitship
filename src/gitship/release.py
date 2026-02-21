@@ -264,7 +264,8 @@ def get_unpushed_commits(repo_path: Path) -> int:
     try:
         # Fetch remote state without pulling
         run_git(["fetch", "origin"], cwd=repo_path, check=False)
-        res = run_git(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_path, check=False)
+        branch = get_current_branch(repo_path)
+        res = run_git(["rev-list", "--count", f"origin/{branch}..HEAD"], cwd=repo_path, check=False)
         return int(res) if res else 0
     except:
         return 0
@@ -851,9 +852,71 @@ def reset_version_to_tag(repo_path: Path):
         run_git(["push"], cwd=repo_path)
         print("✓ Pushed")
 
-def perform_git_release(repo_path: Path, version: str, release_title: str = "", github_notes: str = ""):
-    tag = f"v{version}"
-    
+
+def get_current_branch(repo_path: Path) -> str:
+    """Get the current git branch name."""
+    return run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path, check=False) or "main"
+
+
+def _validate_pypi_version(v: str) -> bool:
+    """
+    Basic PEP 440 sanity check - not exhaustive but catches obvious garbage.
+    Allows: 1.2.3  /  2026.21441  /  2026.21441.1  /  1.0.0a1  /  1.0.0.post1
+    """
+    import re
+    return bool(re.match(
+        r'^[0-9]+(\.[0-9a-zA-Z]+)*([._-]?(a|b|rc|alpha|beta|post|dev)[0-9]*)?$',
+        v.strip()
+    ))
+
+
+def _validate_git_tag(t: str) -> bool:
+    """
+    Git tag rules: no spaces, no ~^:?*[ backslash, no leading dot or dash, not ..
+    """
+    import re
+    if not t or len(t) > 250:
+        return False
+    if re.search(r'[ ~^:?*\x00-\x1f\x7f]', t):
+        return False
+    if '[' in t or '\\\\' in t:
+        return False
+    if t.startswith('.') or t.startswith('-'):
+        return False
+    if '..' in t or t.endswith('.'):
+        return False
+    return True
+
+
+def _build_tag_name(version: str, branch: str) -> str:
+    """
+    Build the correct tag name based on version scheme and branch.
+
+    CVE scheme  (YYYY.CVENUM  or  YYYY.CVENUM.patch):
+        main / lts-dispatcher  ->  CVE-YYYY-CVENUM          e.g. CVE-2026-21441
+        lts-py37 / lts-py38   ->  CVE-YYYY-CVENUM-lts-py37  e.g. CVE-2026-21441-lts-py37
+        with patch suffix     ->  CVE-2026-21441.1-lts-py37
+
+    Semver / anything else    ->  v{version}
+    """
+    import re
+    m = re.match(r'^(20\d\d)\.(\d{5,})(?:\.(\d+))?$', version)
+    if not m:
+        return f"v{version}"
+    year, cve_num, patch = m.group(1), m.group(2), m.group(3)
+    base_tag = f"CVE-{year}-{cve_num}"
+    suffix   = f".{patch}" if patch else ""
+    is_main  = branch in ("main", "lts-dispatcher", "master")
+    return f"{base_tag}{suffix}" if is_main else f"{base_tag}{suffix}-{branch}"
+
+def perform_git_release(repo_path: Path, version: str, release_title: str = "", github_notes: str = "", custom_tag: str = ""):
+    # -- Detect branch and build tag -------------------------------------------
+    current_branch = get_current_branch(repo_path)
+    tag = custom_tag if custom_tag else _build_tag_name(version, current_branch)
+
+    print(f"\n  Branch : {current_branch}")
+    print(f"  Tag    : {tag}")
+
     # Check remote first
     if check_remote_tag(repo_path, tag):
         print(f"\n❌ Error: Tag {tag} already exists on remote!")
@@ -900,7 +963,7 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = "", 
         print(f"\n🔄 You have {unpushed_check} unpushed commits, checking for remote updates...")
         
         # ATOMIC: Stash right before pull to prevent AI translator interference
-        result = atomic_stash_and_run(repo_path, ["pull", "origin", "main", "--rebase"], "pull rebase")
+        result = atomic_stash_and_run(repo_path, ["pull", "origin", current_branch, "--rebase"], "pull rebase")
         
         if result.returncode != 0:
             # Check if it's a conflict
@@ -976,8 +1039,8 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = "", 
         print("\n✓ Already up to date with remote")
     
     # CRITICAL: Push commits FIRST, then tags (with atomic stashing)
-    print("\n📤 Step 1/2: Pushing commits to origin/main...")
-    result = atomic_stash_and_run(repo_path, ["push", "origin", "main"], "push commits")
+    print(f"\n📤 Step 1/2: Pushing commits to origin/{current_branch}...")
+    result = atomic_stash_and_run(repo_path, ["push", "origin", current_branch], "push commits")
     
     if result.returncode != 0:
         print("\n❌ COMMIT PUSH FAILED - ABORTING RELEASE")
@@ -1459,10 +1522,14 @@ def _main_logic(repo_path: Path):
     # Case 1: Version bumped but not tagged (In Progress)
     # Case 1: Version bumped but not tagged (In Progress)
     if current_ver != last_ver and current_ver > last_ver:
+        actual_git_tag = run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_path, check=False)
         print(f"⚠️  RELEASE IN PROGRESS DETECTED")
-        print(f"   TOML Version: {current_ver}")
-        print(f"   Git Tag:      {last_tag_full}")
-        print(f"   Local Changes: {'Yes' if is_dirty(repo_path) else 'No'}")
+        print(f"   TOML Version  : {current_ver}")
+        print(f"   Latest Git Tag: {actual_git_tag or 'none'}")
+        print(f"   PyPI Published: {last_tag_full or 'none'}")
+        if actual_git_tag and actual_git_tag != last_tag_full:
+            print(f"   ⚠️  Git tag {actual_git_tag} is NOT on PyPI — publish workflow may have failed")
+        print(f"   Local Changes : {'Yes' if is_dirty(repo_path) else 'No'}")
         
         # Check if changelog exists for current version
         changelog_exists = bool(extract_changelog_section(repo_path, current_ver))
@@ -1485,12 +1552,73 @@ def _main_logic(repo_path: Path):
             elif choice == '3': choice = '4'
         
         if choice == '1':
-            perform_git_release(repo_path, current_ver)
+            # -- Smart resume: check tag + PyPI state before blindly calling perform_git_release
+            current_branch = get_current_branch(repo_path)
+            resume_tag = _build_tag_name(current_ver, current_branch)
+
+            # Force fetch so ls-remote sees the actual remote state
+            run_git(["fetch", "--tags", "origin"], cwd=repo_path, check=False)
+            tag_on_remote = check_remote_tag(repo_path, resume_tag)
+
+            from . import pypi as _pypi_mod
+            _pkg_name_resume = _pypi_mod.read_package_name(repo_path)
+            on_pypi = check_pypi_version_exists(_pkg_name_resume, current_ver) if _pkg_name_resume else False
+
+
+            if tag_on_remote and on_pypi:
+                # Fully released - nothing to do
+                print(f"\n✅ {resume_tag} is already on remote AND on PyPI. Nothing to resume.")
+                print("   Use option 4 (RESET) to bump to a new version.")
+                return
+
+            elif tag_on_remote and not on_pypi:
+                # Tag pushed but PyPI publish failed - offer retag or force republish
+                print(f"\n⚠️  Tag {resume_tag} exists on remote but version {current_ver} is NOT on PyPI.")
+                print("   The publish workflow likely failed after tagging.")
+                print()
+                print("  [1] Re-push same tag  (triggers CI/CD again if you fixed the workflow)")
+                print("  [2] Delete tag + retag (delete remote tag, recreate, re-push — same version)")
+                print("  [3] Cancel")
+                sub = input("\nChoice: ").strip()
+
+                if sub == '1':
+                    # GH Actions triggers on release event not tag push
+                    # Must delete + recreate the GitHub release to re-trigger
+                    import shutil as _shutil
+                    if _shutil.which("gh"):
+                        print(f"  Deleting GitHub release {resume_tag}...")
+                        subprocess.run(["gh", "release", "delete", resume_tag, "-y"],
+                                      cwd=repo_path, check=False, capture_output=True)
+                        print(f"  Recreating GitHub release {resume_tag}...")
+                        subprocess.run(["gh", "release", "create", resume_tag,
+                                       "--title", f"Release {resume_tag}",
+                                       "--generate-notes"],
+                                      cwd=repo_path, check=False)
+                        print(f"  ✓ Done — publish workflow should re-trigger now")
+                    else:
+                        print(f"  ⚠️  gh CLI not found.")
+                        print(f"  Go to GitHub → Releases → delete and recreate {resume_tag}")
+                elif sub == '2':
+                    import shutil as _shutil
+                    print(f"\n  Deleting GitHub release {resume_tag}...")
+                    if _shutil.which("gh"):
+                        subprocess.run(["gh", "release", "delete", resume_tag, "-y"],
+                                      cwd=repo_path, check=False, capture_output=True)
+                    print(f"  Deleting remote tag {resume_tag}...")
+                    run_git(["push", "origin", f":refs/tags/{resume_tag}"], cwd=repo_path, check=False)
+                    run_git(["tag", "-d", resume_tag], cwd=repo_path, check=False)
+                    print(f"  ✓ Cleaned. Retagging and creating fresh release...")
+                    perform_git_release(repo_path, current_ver)
+                return
+
+            else:
+                # Tag not on remote yet - normal resume
+                perform_git_release(repo_path, current_ver)
             return
             
         elif choice == '2':
             # Delete the CURRENT version tag (if it exists), not the last one
-            tag = f"v{current_ver}"
+            tag = _build_tag_name(current_ver, get_current_branch(repo_path))
             print(f"\n🔄 Resetting release state for {tag}...")
 
             # Check if current version tag exists and delete it
@@ -2053,23 +2181,106 @@ def _main_logic(repo_path: Path):
                 sys.exit(0)
 
     # Case 2: Clean Slate (Normal Flow)
-    print(f"Current Version: {current_ver}")
-    print("\n[1] Patch  [2] Minor  [3] Major")
-    c = input("Bump type: ").strip()
-    
-    if c not in ['1', '2', '3']:
-        print("Invalid choice.")
-        return
-        
-    bump_type = {'1':'patch','2':'minor','3':'major'}[c]
-    
-    # Calculate new version
-    major, minor, patch = map(int, current_ver.split('.'))
-    if bump_type == 'major': new_ver = f"{major+1}.0.0"
-    elif bump_type == 'minor': new_ver = f"{major}.{minor+1}.0"
-    else: new_ver = f"{major}.{minor}.{patch+1}"
-    
-    print(f"\nTarget: {current_ver} -> {new_ver}")
+    print(f"\nCurrent Version: {current_ver}")
+
+    # Detect scheme: CVE (YYYY.CVENUM[.patch]) or semver
+    _cve_match = re.match(r'^(20\d\d)\.(\d{5,})(?:\.(\d+))?$', current_ver)
+    current_branch = get_current_branch(repo_path)
+    custom_tag = ""  # may be set below
+
+    if _cve_match:
+        # ── CVE version scheme ─────────────────────────────────────────────────
+        year      = _cve_match.group(1)
+        cve_num   = _cve_match.group(2)
+        cur_patch = int(_cve_match.group(3) or 0)
+        base_ver  = f"{year}.{cve_num}"
+        auto_next = f"{base_ver}.{cur_patch + 1}"
+        auto_tag  = _build_tag_name(auto_next, current_branch)
+
+        print(f"  Detected CVE version scheme  (branch: {current_branch})")
+        print(f"\n  [1] Increment patch suffix   {current_ver} -> {auto_next}  (tag: {auto_tag})")
+        print(f"  [2] New CVE base              enter YYYY.CVENUM manually")
+        print(f"  [3] Custom version + tag      full manual control")
+        print(f"  [4] Cancel")
+        c = input("\nChoice: ").strip()
+
+        if c == '1':
+            new_ver = auto_next
+        elif c == '2':
+            new_ver = input("  Version (e.g. 2026.99999 or 2026.99999.1): ").strip()
+            if not new_ver:
+                print("Cancelled."); return
+            if not _validate_pypi_version(new_ver):
+                print(f"  ⚠️  '{new_ver}' may not be a valid PyPI version. Continue anyway? [y/N]: ", end="")
+                if input().strip().lower() != 'y':
+                    return
+        elif c == '3':
+            new_ver = input("  Version (PyPI): ").strip()
+            if not new_ver:
+                print("Cancelled."); return
+            if not _validate_pypi_version(new_ver):
+                print(f"  ⚠️  '{new_ver}' may not be valid on PyPI. Continue anyway? [y/N]: ", end="")
+                if input().strip().lower() != 'y':
+                    return
+            suggested_tag = _build_tag_name(new_ver, current_branch)
+            print(f"  Suggested tag: {suggested_tag}")
+            custom_input = input(f"  Tag (enter to use suggested): ").strip()
+            if custom_input:
+                if not _validate_git_tag(custom_input):
+                    print(f"  ⚠️  '{custom_input}' contains characters invalid for git tags.")
+                    if input("  Use anyway? [y/N]: ").strip().lower() != 'y':
+                        return
+                custom_tag = custom_input
+        else:
+            print("Cancelled."); return
+
+    else:
+        # ── Semver + custom option ─────────────────────────────────────────────
+        parts = current_ver.split('.')
+        while len(parts) < 3:
+            parts.append('0')
+        try:
+            major, minor, patch_n = int(parts[0]), int(parts[1]), int(parts[2])
+            opts = {
+                '1': ('patch', f"{major}.{minor}.{patch_n+1}"),
+                '2': ('minor', f"{major}.{minor+1}.0"),
+                '3': ('major', f"{major+1}.0.0"),
+            }
+            print(f"\n  [1] Patch   {current_ver} -> {opts['1'][1]}")
+            print(f"  [2] Minor   {current_ver} -> {opts['2'][1]}")
+            print(f"  [3] Major   {current_ver} -> {opts['3'][1]}")
+            print(f"  [4] Custom  enter version + optional tag manually")
+            c = input("\nBump type: ").strip()
+
+            if c in opts:
+                new_ver = opts[c][1]
+            elif c == '4':
+                new_ver = input("  Version (PyPI): ").strip()
+                if not new_ver:
+                    print("Cancelled."); return
+                if not _validate_pypi_version(new_ver):
+                    print(f"  ⚠️  '{new_ver}' may not be valid on PyPI. Continue anyway? [y/N]: ", end="")
+                    if input().strip().lower() != 'y':
+                        return
+                suggested_tag = f"v{new_ver}"
+                print(f"  Suggested tag: {suggested_tag}")
+                custom_input = input(f"  Tag (enter to use suggested): ").strip()
+                if custom_input:
+                    if not _validate_git_tag(custom_input):
+                        print(f"  ⚠️  '{custom_input}' contains characters invalid for git tags.")
+                        if input("  Use anyway? [y/N]: ").strip().lower() != 'y':
+                            return
+                    custom_tag = custom_input
+            else:
+                print("Invalid choice."); return
+        except ValueError:
+            # Non-numeric version - just offer custom
+            print(f"  Version '{current_ver}' is non-standard. Enter new version manually.")
+            new_ver = input("  Version (PyPI): ").strip()
+            if not new_ver:
+                print("Cancelled."); return
+
+    print(f"\n  {current_ver}  ->  {new_ver}  (tag: {custom_tag or _build_tag_name(new_ver, current_branch)})")
     
     # Update TOML immediately
     toml = repo_path / "pyproject.toml"
@@ -2114,7 +2325,7 @@ def _main_logic(repo_path: Path):
     write_changelog(repo_path, changelog_notes, new_ver)
     
     # Finish
-    perform_git_release(repo_path, new_ver, release_title, github_notes)
+    perform_git_release(repo_path, new_ver, release_title, github_notes, custom_tag=custom_tag)
 
 if __name__ == "__main__":
     main_with_repo(Path.cwd())
