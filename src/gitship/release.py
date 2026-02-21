@@ -1157,8 +1157,8 @@ def _recommend_bump_type(repo_path: Path, last_tag: str) -> tuple[str, str]:
     ])
 
     # Decision logic
-    if has_breaking or total_lines > 500 or files_changed > 20:
-        return 'minor', f"{files_changed} files, {total_lines} lines changed" + (" — breaking change signals detected" if has_breaking else " — large changeset")
+    if has_breaking:
+        return 'major', f"{num_commits} commit(s) — breaking change signals detected ({files_changed} files, {total_lines} lines)"
     elif has_features or total_lines > 100 or num_commits > 5:
         return 'minor', f"{num_commits} commits, {total_lines} lines — new functionality detected"
     else:
@@ -2282,10 +2282,6 @@ def _main_logic(repo_path: Path):
             parts.append('0')
         try:
             major, minor, patch_n = int(parts[0]), int(parts[1]), int(parts[2])
-
-            # --- SHOW DIFF + AUTO-RECOMMEND BEFORE VERSION CHOICE ---
-            recommendation, reasoning = _recommend_bump_type(repo_path, last_tag_full)
-            
             opts = {
                 '1': ('patch', f"{major}.{minor}.{patch_n+1}"),
                 '2': ('minor', f"{major}.{minor+1}.0"),
