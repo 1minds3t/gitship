@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-02-20
+
+CI Control Plane, Smart Init & History Rescue
+
+## 🚀 New Features
+
+- **Interactive Dashboard**: View GitHub Actions stats, failure rates, and duration.
+- **Log Inspection**: Inspect run logs with error highlighting.
+- **Actions**: Trigger, rerun (failed/all), and cancel workflows via CLI.
+- **Management**: Create/Edit workflows from templates using atomic writes and file locking. Manage triggers/cron schedules interactively.
+
+- **Repo Repair**: Detects corruption via `git fsck` and attempts `git gc` recovery.
+- **Blob Healing**: Integrates with `vscode-history` to recover missing blobs/files during setup.
+
+- **Standalone Tool**: Scan and restore files from local VSCode timeline.
+- **Safety**: Supports diff previews and dry-runs before restoring.
+
+- **Smart Recommendations**: Release wizard now analyzes git history/diffs to recommend semver bumps (Major/Minor/Patch).
+- **Unrelated Histories**: New wizard for merging independent trees (Rebase, Force Merge, or Push Separate PR).
+- **Versioning**: Support for CVE-based versioning schemes.
+
+## 🐛 Fixes & Improvements
+- **Commit**: Defaults to `pull --rebase` before pushing to avoid upstream conflicts.
+- **Release Logic**: Fixed semantic version recommendation to correctly identify breaking changes for major bumps.
+- **Dependencies**: Added `filelock` and `ruamel` for robustness.
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/branch.py (263 lines changed)
+- NEW: src/gitship/ci.py (1563 lines changed)
+- UPDATE: src/gitship/cli.py (557 lines changed)
+- UPDATE: src/gitship/commit.py (41 lines changed)
+- NEW: src/gitship/init.py (603 lines changed)
+- UPDATE: src/gitship/release.py (326 lines changed)
+- NEW: src/gitship/vscode_history.py (466 lines changed)
+
+**⚙️ Configuration:**
+- pyproject.toml (2 lines)
+
+**Additional Changes:**
+- fix: return major bump when breaking changes detected
+- feat: add smart version bump recommendation to release wizard
+- feat: add CI control plane, smart init with rescue, and advanced release workflows
+
+_8 files changed, 3519 insertions(+), 302 deletions(-)_
+
 ## [0.3.5] — 2026-02-18
 
 Update license to AGPL.
