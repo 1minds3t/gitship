@@ -1117,6 +1117,53 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = "", 
         title_suffix=release_title
     )
 
+def _recommend_bump_type(repo_path: Path, last_tag: str) -> tuple[str, str]:
+    """
+    Analyze the diff since last_tag and recommend a semver bump type.
+    Returns (bump_type, reasoning).
+    """
+    from_ref = last_tag or get_first_commit_ref(repo_path)
+    
+    # Show the shortstat first so user can see it
+    shortstat = run_git(
+        ["diff", "--shortstat", f"{from_ref}...HEAD"],
+        cwd=repo_path, check=False
+    )
+    commit_messages = run_git(
+        ["log", f"{from_ref}..HEAD", "--pretty=format:%s"],
+        cwd=repo_path, check=False
+    )
+    num_commits = len([l for l in commit_messages.splitlines() if l.strip()])
+    
+    if shortstat:
+        print(f"\n{Colors.CYAN}📊 Changes since {from_ref}:{Colors.RESET}")
+        print(f"   {shortstat}")
+        print(f"   {num_commits} commit(s)")
+        print()
+
+    # Parse shortstat: "X files changed, Y insertions(+), Z deletions(-)"
+    files_changed = int(re.search(r'(\d+) file', shortstat or '').group(1) if re.search(r'(\d+) file', shortstat or '') else 0)
+    insertions   = int(re.search(r'(\d+) insertion', shortstat or '').group(1) if re.search(r'(\d+) insertion', shortstat or '') else 0)
+    deletions    = int(re.search(r'(\d+) deletion', shortstat or '').group(1) if re.search(r'(\d+) deletion', shortstat or '') else 0)
+    total_lines  = insertions + deletions
+
+    # Check commit messages for breaking change signals
+    messages_lower = commit_messages.lower()
+    has_breaking = any(kw in messages_lower for kw in [
+        'breaking', 'breaking change', '!:', 'removed', 'remove ', 'drop ', 'incompatible'
+    ])
+    has_features = any(kw in messages_lower for kw in [
+        'feat:', 'feature:', 'add ', 'added', 'new ', 'support '
+    ])
+
+    # Decision logic
+    if has_breaking or total_lines > 500 or files_changed > 20:
+        return 'minor', f"{files_changed} files, {total_lines} lines changed" + (" — breaking change signals detected" if has_breaking else " — large changeset")
+    elif has_features or total_lines > 100 or num_commits > 5:
+        return 'minor', f"{num_commits} commits, {total_lines} lines — new functionality detected"
+    else:
+        return 'patch', f"{num_commits} commit(s), {total_lines} lines — looks like a small fix/change"
+
 # --- MAIN FLOW ---
 
 def main_with_repo(repo_path: Path):
@@ -1634,12 +1681,6 @@ def _main_logic(repo_path: Path):
             
             # 3. Use LAST tag as the base
             prev_tag = last_tag_full
-            
-            print("\n📊 Reviewing changes before generating changelog...")
-            # Show review to help write better release notes
-            if not show_review_before_changelog(repo_path, prev_tag, "HEAD"):
-                print("Release cancelled.")
-                return
             
             print("\nRegenerating changelog from git history...")
             # CORRECTLY UNPACK THE TUPLE
@@ -2241,15 +2282,21 @@ def _main_logic(repo_path: Path):
             parts.append('0')
         try:
             major, minor, patch_n = int(parts[0]), int(parts[1]), int(parts[2])
+
+            # --- SHOW DIFF + AUTO-RECOMMEND BEFORE VERSION CHOICE ---
+            recommendation, reasoning = _recommend_bump_type(repo_path, last_tag_full)
+            
             opts = {
                 '1': ('patch', f"{major}.{minor}.{patch_n+1}"),
                 '2': ('minor', f"{major}.{minor+1}.0"),
                 '3': ('major', f"{major+1}.0.0"),
             }
+            recommendation, reasoning = _recommend_bump_type(repo_path, last_tag_full)
             print(f"\n  [1] Patch   {current_ver} -> {opts['1'][1]}")
             print(f"  [2] Minor   {current_ver} -> {opts['2'][1]}")
             print(f"  [3] Major   {current_ver} -> {opts['3'][1]}")
             print(f"  [4] Custom  enter version + optional tag manually")
+            print(f"\n  💡 Recommended: {recommendation.upper()} — {reasoning}")
             c = input("\nBump type: ").strip()
 
             if c in opts:
