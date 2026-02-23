@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from gitship.changelog_generator import run_git, get_all_commits_since_tag
-except ImportError as e:
-    # Fallback
+    from gitship.changelog_generator import run_git
+except ImportError:
     def run_git(args, cwd, check=False):
         result = subprocess.run(
             ["git"] + args,
@@ -22,8 +21,36 @@ except ImportError as e:
             check=False
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    
-    get_all_commits_since_tag = None
+
+
+def _get_commits_in_range(repo_path, base_ref, head_ref):
+    import subprocess as _sp
+    result = _sp.run(
+        ["git", "log", base_ref + ".." + head_ref,
+         "--pretty=format:%H|||%s|||%B|||END_COMMIT",
+         "--no-merges"],
+        cwd=repo_path, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    commits = []
+    noise = ["merge", "auto-merge", "sync main", "sync development", "chore: release"]
+    for block in result.stdout.strip().split("|||END_COMMIT"):
+        block = block.strip()
+        if not block:
+            continue
+        parts = block.split("|||", 2)
+        if len(parts) < 2:
+            continue
+        sha = parts[0].strip()
+        subject = parts[1].strip()
+        body = parts[2].strip() if len(parts) > 2 else ""
+        if body.startswith(subject):
+            body = body[len(subject):].strip()
+        if any(p in subject.lower() for p in noise):
+            continue
+        commits.append({"sha": sha, "subject": subject, "body": body})
+    return commits
 
 
 def generate_merge_message(
@@ -141,10 +168,9 @@ def generate_merge_message(
     
     lines = [title, ""]
     
-    # Use changelog generator if available - SHOW CATEGORIZED COMMITS FIRST
-    if get_all_commits_since_tag:
-        # Get ALL commits in range (no dedup)
-        commits = get_all_commits_since_tag(repo_path, base_ref)
+    # Get commits in range - SHOW CATEGORIZED COMMITS FIRST
+    if True:
+        commits = _get_commits_in_range(repo_path, base_ref, head_ref)
         
         if commits:
             # Group by category and deduplicate
@@ -168,32 +194,40 @@ def generate_merge_message(
             for subject, commit_list in commit_groups.items():
                 subject_lower = subject.lower()
                 
-                # Build commit line
+                # Build commit line with full body
                 if len(commit_list) == 1:
                     commit = commit_list[0]
-                    commit_line = f"  • {subject} ({commit['sha'][:7]})"
-                    
-                    # Add body excerpt if available and meaningful
-                    if commit.get('body') and len(commit['body']) > 10:
-                        body_lines = commit['body'].split('\n')[:2]
-                        for body_line in body_lines:
-                            stripped = body_line.strip()
-                            if stripped and not stripped.startswith('[') and not stripped.startswith('#'):
-                                commit_line += f"\n    {stripped}"
-                                break
+                    commit_line = f"  * {subject} ({commit['sha'][:7]})"
+                    body = commit.get('body', '').strip()
+                    if body:
+                        sub = []
+                        for bl in body.split('\n'):
+                            bl = bl.strip()
+                            if not bl:
+                                continue
+                            if bl.startswith('[gitship') or bl.lower().startswith('co-authored'):
+                                continue
+                            sub.append('      ' + bl)
+                        if sub:
+                            commit_line += '\n' + '\n'.join(sub)
                 else:
                     # Multiple commits with same subject - show count only
-                    commit_line = f"  • {subject} (×{len(commit_list)})"
+                    commit_line = f"  * {subject} (x{len(commit_list)})"
                 
-                # Categorize
-                if any(kw in subject_lower for kw in ['feat', 'feature', 'add']) and 'test' not in subject_lower:
+                # Categorize by conventional commit prefix first, then keywords
+                prefix = subject_lower.split('(')[0].split(':')[0].strip()
+                if prefix in ('feat', 'feature') or (any(kw in subject_lower for kw in ['feat', 'feature', 'add']) and 'test' not in subject_lower):
                     features.append(commit_line)
-                elif any(kw in subject_lower for kw in ['fix', 'bug', 'patch']):
+                elif prefix in ('fix', 'bug', 'hotfix') or any(kw in subject_lower for kw in ['fix', 'bug', 'patch', 'revert']):
                     fixes.append(commit_line)
-                elif any(kw in subject_lower for kw in ['doc', 'readme']):
-                    docs.append(commit_line)
-                elif any(kw in subject_lower for kw in ['test', 'spec', 'concurrency']):
+                elif prefix in ('refactor',) or 'refactor' in subject_lower:
+                    features.append(commit_line)  # refactors go under features as improvements
+                elif prefix in ('test',) or any(kw in subject_lower for kw in ['test', 'spec', 'concurrency', 'benchmark']):
                     tests.append(commit_line)
+                elif prefix in ('docs', 'doc') or any(kw in subject_lower for kw in ['doc', 'readme']):
+                    docs.append(commit_line)
+                elif prefix in ('ci', 'chore', 'build', 'i18n') or any(kw in subject_lower for kw in ['workflow', 'ci:', 'i18n', 'translation', 'locale']):
+                    other.append(commit_line)
                 else:
                     other.append(commit_line)
             

@@ -85,52 +85,265 @@ def get_pypi_latest_version(repo_path: Path) -> Optional[str]:
     
     return None
 
-def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "HEAD") -> bool:
+def _ref_exists_locally(repo_path: Path, ref: str) -> bool:
+    """Return True if ref resolves to a commit in the local repo."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            cwd=repo_path, capture_output=True, text=True
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_all_local_tags(repo_path: Path) -> list:
+    """Return all local tags sorted newest-first by tag date."""
+    out = run_git(["tag", "--sort=-creatordate"], cwd=repo_path, check=False)
+    return [t.strip() for t in out.splitlines() if t.strip()]
+
+
+def _push_local_tags_to_remote(repo_path: Path, tags: list) -> list:
+    """
+    Offer to push all local tags that are not on remote.
+    Returns the updated list of tags that now exist on remote (or locally).
+    """
+    if not tags:
+        return tags
+
+    print(f"\n{Colors.CYAN}Checking which local tags are on remote...{Colors.RESET}")
+    unpushed = []
+    for tag in tags:
+        res = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/tags/{tag}"],
+            cwd=repo_path, capture_output=True, text=True
+        )
+        if not res.stdout.strip():
+            unpushed.append(tag)
+
+    if not unpushed:
+        print(f"  {Colors.GREEN}✓ All local tags already on remote.{Colors.RESET}")
+        return tags
+
+    print(f"  {Colors.YELLOW}{len(unpushed)} local tag(s) not on remote:{Colors.RESET}")
+    for t in unpushed[:10]:
+        print(f"    {t}")
+    if len(unpushed) > 10:
+        print(f"    ... and {len(unpushed) - 10} more")
+
+    try:
+        push_choice = input(f"\nPush these {len(unpushed)} tag(s) to remote now? (y/n/select): ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return tags
+
+    if push_choice in ("y", "yes"):
+        for tag in unpushed:
+            res = subprocess.run(
+                ["git", "push", "origin", tag],
+                cwd=repo_path, capture_output=True, text=True
+            )
+            if res.returncode == 0:
+                print(f"  {Colors.GREEN}✓ Pushed {tag}{Colors.RESET}")
+            else:
+                print(f"  {Colors.YELLOW}⚠ Failed to push {tag}: {res.stderr.strip()}{Colors.RESET}")
+    elif push_choice == "select":
+        print("  Enter tag numbers to push (space-separated), or Enter to skip:")
+        for i, t in enumerate(unpushed, 1):
+            print(f"    {i}. {t}")
+        try:
+            sel = input("  Numbers: ").strip()
+            for part in sel.split():
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < len(unpushed):
+                        tag = unpushed[idx]
+                        res = subprocess.run(
+                            ["git", "push", "origin", tag],
+                            cwd=repo_path, capture_output=True, text=True
+                        )
+                        if res.returncode == 0:
+                            print(f"  {Colors.GREEN}✓ Pushed {tag}{Colors.RESET}")
+                        else:
+                            print(f"  {Colors.YELLOW}⚠ Failed: {res.stderr.strip()}{Colors.RESET}")
+                except ValueError:
+                    pass
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+    return tags
+
+
+def _pick_review_tag(repo_path: Path, suggested_from: str) -> str:
+    """
+    Let the user choose which tag to compare HEAD against.
+    Shows all local tags (all branches), highlights the suggested one.
+    Returns the chosen tag/ref, or empty string to skip review.
+    """
+    # Fetch remote tags so we have the full picture
+    print(f"  {Colors.DIM}Fetching remote tags...{Colors.RESET}", flush=True)
+    subprocess.run(["git", "fetch", "--tags", "origin"],
+                   cwd=repo_path, capture_output=True)
+
+    tags = _get_all_local_tags(repo_path)
+
+    # Also fetch unpushed tags from origin (already merged by fetch above)
+    if not tags:
+        print(f"  {Colors.YELLOW}No tags found locally or on remote.{Colors.RESET}")
+        return ""
+
+    # Offer to push unpushed tags before the pick
+    _push_local_tags_to_remote(repo_path, tags)
+
+    # Refresh tag list after any pushes
+    tags = _get_all_local_tags(repo_path)
+
+    print(f"\n{Colors.BOLD}Select comparison base (tags across all branches):{Colors.RESET}")
+    print(f"  {Colors.DIM}Suggested: {suggested_from}{Colors.RESET}")
+    print()
+
+    # Group tags by rough category for readability
+    limit = min(len(tags), 20)
+    for i, tag in enumerate(tags[:limit], 1):
+        marker = f" {Colors.GREEN}← suggested{Colors.RESET}" if tag == suggested_from else ""
+        print(f"  {i:2d}. {tag}{marker}")
+    if len(tags) > limit:
+        print(f"       ... ({len(tags) - limit} more, enter tag name manually)")
+
+    print()
+    print(f"  Enter number, tag name, commit SHA, or branch name.")
+    print(f"  Press Enter to use suggested ({Colors.YELLOW}{suggested_from}{Colors.RESET}), or 's' to skip review.")
+    print()
+
+    try:
+        raw = input("  From: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return suggested_from
+
+    if raw.lower() == "s":
+        return ""
+    if not raw:
+        return suggested_from
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(tags):
+            return tags[idx]
+        print(f"  {Colors.YELLOW}Index out of range, using suggested.{Colors.RESET}")
+        return suggested_from
+    # Raw ref name — validate it exists (locally or after fetch)
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", raw],
+        cwd=repo_path, capture_output=True, text=True
+    )
+    if check.returncode == 0:
+        return raw
+    # Try as remote ref
+    check2 = subprocess.run(
+        ["git", "rev-parse", "--verify", f"origin/{raw}"],
+        cwd=repo_path, capture_output=True, text=True
+    )
+    if check2.returncode == 0:
+        return f"origin/{raw}"
+    print(f"  {Colors.YELLOW}Could not resolve '{raw}', using suggested.{Colors.RESET}")
+    return suggested_from
+
+
+def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "HEAD") -> tuple:
     """
     Show interactive review of changes before generating changelog.
-    Returns True if user wants to continue, False to cancel.
+
+    Flow:
+      1. Fetch remote tags.
+      2. Offer to push any local-only tags to remote.
+      3. Let user pick which tag/ref to compare from (defaults to suggested from_ref).
+         Tags from all branches are shown — cross-branch diff works fine via git diff.
+      4. If the chosen ref is a valid git object → standard git diff via review module.
+      5. If no valid ref can be found at all → PyPI sdist fallback, but only comparing
+         files that would be in the built package (src/ layout, exclude tests/docs/ci).
+
+    Returns (continue: bool, resolved_ref: str) where resolved_ref is the actual git
+    ref the user chose — use this for get_smart_changelog instead of the raw PyPI version.
     """
     try:
-        from gitship import review
-        
+        from gitship import review as _review_mod
+
         print(f"\n{Colors.CYAN}{Colors.BOLD}📊 COMMIT REVIEW{Colors.RESET}")
         print("=" * 80)
         print(f"{Colors.DIM}Reviewing changes to help write better release notes{Colors.RESET}")
         print()
-        print(f"From: {Colors.YELLOW}{from_ref}{Colors.RESET}")
-        print(f"To:   {Colors.GREEN}{to_ref}{Colors.RESET}")
-        print()
-        
-        # Call review.main_with_args - it will display the review
-        # Parameters: repo_path, from_ref, to_ref, export, export_path, stat_only
-        review.main_with_args(
-            repo_path=repo_path,
-            from_ref=from_ref,
-            to_ref=to_ref,
-            export=False,
-            export_path=None,
-            stat_only=False
-        )
-        
+
+        # Step 1+2+3: push unpushed tags, let user pick comparison base
+        chosen_ref = _pick_review_tag(repo_path, suggested_from=from_ref)
+
+        if chosen_ref == "":
+            # User explicitly skipped
+            print(f"{Colors.DIM}Review skipped.{Colors.RESET}")
+        elif _ref_exists_locally(repo_path, chosen_ref):
+            # Normal git diff path — works cross-branch because git diff just
+            # needs both refs to resolve to commits; branch doesn't matter.
+            print()
+            print(f"From: {Colors.YELLOW}{chosen_ref}{Colors.RESET}")
+            print(f"To:   {Colors.GREEN}{to_ref}{Colors.RESET}")
+            print()
+            _review_mod.main_with_args(
+                repo_path=repo_path,
+                from_ref=chosen_ref,
+                to_ref=to_ref,
+                export=False,
+                export_path=None,
+                stat_only=False,
+            )
+        else:
+            # Absolute last resort: PyPI sdist diff filtered to package source only
+            print(f"{Colors.YELLOW}⚠  No usable local git ref found — falling back to PyPI source diff.{Colors.RESET}")
+            print()
+
+            try:
+                from . import pypi as _pypi_mod
+                package_name = _pypi_mod.read_package_name(repo_path)
+            except Exception:
+                package_name = None
+            if not package_name:
+                toml = repo_path / "pyproject.toml"
+                if toml.exists():
+                    m = re.search(r'name\s*=\s*"([^"]+)"', toml.read_text())
+                    package_name = m.group(1) if m else None
+
+            pypi_version = from_ref.lstrip("v")
+
+            if package_name and pypi_version:
+                print(f"From: {Colors.YELLOW}PyPI {package_name}=={pypi_version}{Colors.RESET}")
+                print(f"To:   {Colors.GREEN}local source (package files only){Colors.RESET}")
+                print()
+                _review_mod.main_with_args_pypi(
+                    repo_path=repo_path,
+                    package_name=package_name,
+                    pypi_version=pypi_version,
+                    to_ref=to_ref,
+                    src_only=True,
+                )
+            else:
+                print(f"{Colors.YELLOW}Could not determine package — skipping diff.{Colors.RESET}")
+
         print()
         print("=" * 80)
         print(f"{Colors.BOLD}Ready to write release notes?{Colors.RESET}")
         print("  y - Continue to release notes editor")
         print("  n - Cancel release")
         print()
-        
+
         try:
             choice = input("Continue? (y/n): ").strip().lower()
-            return choice in ('y', 'yes', '')
+            ok = choice in ('y', 'yes', '')
+            return ok, chosen_ref if chosen_ref else from_ref
         except (KeyboardInterrupt, EOFError):
-            return False
-            
+            return False, from_ref
+
     except ImportError:
         print(f"{Colors.YELLOW}⚠️  Review module not available, skipping review{Colors.RESET}")
-        return True
+        return True, from_ref
     except Exception as e:
         print(f"{Colors.YELLOW}⚠️  Error showing review: {e}{Colors.RESET}")
-        return True
+        return True, from_ref
 
 
 def get_last_tag(repo_path: Path, prefer_pypi: bool = True) -> str:
@@ -888,31 +1101,60 @@ def _validate_git_tag(t: str) -> bool:
     return True
 
 
-def _build_tag_name(version: str, branch: str) -> str:
+def _build_tag_name(version: str, branch: str, repo_path: Path = None) -> str:
     """
     Build the correct tag name based on version scheme and branch.
 
     CVE scheme  (YYYY.CVENUM  or  YYYY.CVENUM.patch):
         main / lts-dispatcher  ->  CVE-YYYY-CVENUM          e.g. CVE-2026-21441
-        lts-py37 / lts-py38   ->  CVE-YYYY-CVENUM-lts-py37  e.g. CVE-2026-21441-lts-py37
-        with patch suffix     ->  CVE-2026-21441.1-lts-py37
+        lts-py37 / lts-py38   ->  CVE-YYYY-CVENUM-py37      e.g. CVE-2026-21441-py37
+        with patch suffix     ->  CVE-2026-21441.1-py37
+
+    Branch suffix is stripped of the "lts-" prefix automatically, so "lts-py37" → "-py37".
+    You can override the suffix entirely in config (project_tag_suffix), e.g. "-py37".
 
     Semver / anything else    ->  v{version}
     """
     import re
+
+    # Allow per-project override of the branch suffix via config
+    # config key: project_tag_suffix  value e.g. "-py37" or "" for no suffix
+    _custom_suffix = None
+    if repo_path is not None:
+        try:
+            from gitship.config import load_config
+            _cfg = load_config()
+            _project_key = str(repo_path.resolve())
+            _custom_suffix = _cfg.get("project_tag_suffix", {}).get(_project_key)
+        except Exception:
+            pass
+
     m = re.match(r'^(20\d\d)\.(\d{5,})(?:\.(\d+))?$', version)
     if not m:
         return f"v{version}"
     year, cve_num, patch = m.group(1), m.group(2), m.group(3)
     base_tag = f"CVE-{year}-{cve_num}"
-    suffix   = f".{patch}" if patch else ""
-    is_main  = branch in ("main", "lts-dispatcher", "master")
-    return f"{base_tag}{suffix}" if is_main else f"{base_tag}{suffix}-{branch}"
+    patch_suffix = f".{patch}" if patch else ""
+
+    # Determine branch suffix
+    if _custom_suffix is not None:
+        # Explicit override — empty string means "no suffix" (acts like main)
+        branch_suffix = _custom_suffix
+    else:
+        is_main = branch in ("main", "lts-dispatcher", "master")
+        if is_main:
+            branch_suffix = ""
+        else:
+            # Strip leading "lts-" so "lts-py37" becomes "-py37" not "-lts-py37"
+            clean_branch = re.sub(r'^\s*lts-', '', branch)
+            branch_suffix = f"-{clean_branch}"
+
+    return f"{base_tag}{patch_suffix}{branch_suffix}"
 
 def perform_git_release(repo_path: Path, version: str, release_title: str = "", github_notes: str = "", custom_tag: str = ""):
     # -- Detect branch and build tag -------------------------------------------
     current_branch = get_current_branch(repo_path)
-    tag = custom_tag if custom_tag else _build_tag_name(version, current_branch)
+    tag = custom_tag if custom_tag else _build_tag_name(version, current_branch, repo_path)
 
     print(f"\n  Branch : {current_branch}")
     print(f"  Tag    : {tag}")
@@ -1601,7 +1843,7 @@ def _main_logic(repo_path: Path):
         if choice == '1':
             # -- Smart resume: check tag + PyPI state before blindly calling perform_git_release
             current_branch = get_current_branch(repo_path)
-            resume_tag = _build_tag_name(current_ver, current_branch)
+            resume_tag = _build_tag_name(current_ver, current_branch, repo_path)
 
             # Force fetch so ls-remote sees the actual remote state
             run_git(["fetch", "--tags", "origin"], cwd=repo_path, check=False)
@@ -1665,7 +1907,7 @@ def _main_logic(repo_path: Path):
             
         elif choice == '2':
             # Delete the CURRENT version tag (if it exists), not the last one
-            tag = _build_tag_name(current_ver, get_current_branch(repo_path))
+            tag = _build_tag_name(current_ver, get_current_branch(repo_path), repo_path)
             print(f"\n🔄 Resetting release state for {tag}...")
 
             # Check if current version tag exists and delete it
@@ -1679,11 +1921,14 @@ def _main_logic(repo_path: Path):
                 run_git(["tag", "-d", tag], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted local tag {tag}")
             
-            # 3. Use LAST tag as the base
-            prev_tag = last_tag_full
-            
+            # 3. Let user pick comparison base via review (resolves the actual git ref)
+            print("\n📊 Reviewing changes before regenerating changelog...")
+            _rev_ok1, prev_tag = show_review_before_changelog(repo_path, last_tag_full or get_first_commit_ref(repo_path), "HEAD")
+            if not _rev_ok1:
+                print("Release cancelled.")
+                return
+
             print("\nRegenerating changelog from git history...")
-            # CORRECTLY UNPACK THE TUPLE
             draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
             
             # 4. USE THE EDITOR, DON'T SKIP IT
@@ -1710,27 +1955,42 @@ def _main_logic(repo_path: Path):
         else:
             print("Invalid choice.")
             return
-    # Case 1.4: Tag exists locally but not on remote
+    # Case 1.4: Tag exists locally but not on remote.
+    # IMPORTANT: last_tag_full comes from PyPI (e.g. "v2025.66471.3") which is NOT the
+    # same string as the actual local git tag (e.g. "CVE-2025-66471-py37").
+    # We must resolve the git tag name via _build_tag_name before checking/pushing.
     if last_tag_full:
-        tag_on_remote = check_remote_tag(repo_path, last_tag_full)
-        
-        if not tag_on_remote:
-            print(f"\n⚠️  UNPUSHED TAG DETECTED!")
-            print(f"   Tag {last_tag_full} exists locally but NOT on remote")
-            print(f"   This will cause GitHub release creation to fail.")
-            
-            push_now = input(f"\nPush tag to remote now? (y/n): ").strip().lower()
-            
-            if push_now == 'y':
-                print(f"\n🚀 Pushing {last_tag_full} to remote...")
-                try:
-                    run_git(["push", "origin", last_tag_full], cwd=repo_path)
-                    print(f"✓ Tag pushed successfully")
-                except:
-                    print(f"❌ Failed to push tag")
-                    return
-            else:
-                print("Skipped. You'll need to push manually before creating releases.")
+        current_branch = get_current_branch(repo_path)
+        _last_ver_raw = last_tag_full.lstrip('v')
+        _derived_git_tag = _build_tag_name(_last_ver_raw, current_branch, repo_path)
+
+        _local_tags = run_git(["tag", "-l"], cwd=repo_path, check=False).splitlines()
+        # Only proceed if the derived git tag actually exists locally.
+        # We never use the raw PyPI version string as a tag name.
+        _local_tag_name = _derived_git_tag if _derived_git_tag in _local_tags else None
+
+        if _local_tag_name:
+            tag_on_remote = check_remote_tag(repo_path, _local_tag_name)
+
+            if not tag_on_remote:
+                print(f"\n⚠️  UNPUSHED TAG DETECTED!")
+                print(f"   Local git tag : {_local_tag_name}")
+                print(f"   PyPI version  : {last_tag_full}")
+                print(f"   This tag exists locally but NOT on remote.")
+                print(f"   This will cause GitHub release creation to fail.")
+
+                push_now = input(f"\nPush tag {_local_tag_name} to remote now? (y/n): ").strip().lower()
+
+                if push_now == 'y':
+                    print(f"\n🚀 Pushing {_local_tag_name} to remote...")
+                    try:
+                        run_git(["push", "origin", _local_tag_name], cwd=repo_path)
+                        print(f"✓ Tag pushed successfully")
+                    except:
+                        print(f"❌ Failed to push tag")
+                        return
+                else:
+                    print(f"Skipped. Push manually with:  git push origin {_local_tag_name}")
         # Case 1.4: Incomplete release - tag/release exists but code changes uncommitted OR commits ahead
     if current_ver == last_ver and last_tag_full:
         # Check if there are uncommitted code changes (excluding translations)
@@ -1873,7 +2133,8 @@ def _main_logic(repo_path: Path):
                         prev_tag = get_last_tag(repo_path)
                         
                         print("\n📊 Reviewing changes before regenerating changelog...")
-                        if not show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD"):
+                        _rev_ok2, prev_tag = show_review_before_changelog(repo_path, prev_tag or "HEAD~10", "HEAD")
+                        if not _rev_ok2:
                             print("Skipping changelog regeneration.")
                         else:
                             print("\n🔄 Regenerating changelog from git history...")
@@ -1984,31 +2245,45 @@ def _main_logic(repo_path: Path):
 
     # Case 1.5: Release exists (draft or full) but publish may have failed
     # Covers: draft release, full release not on PyPI, workflow still running
-    if current_ver == last_ver and last_tag_full and shutil.which("gh"):
+    #
+    # IMPORTANT: last_tag_full is a PyPI version string (e.g. "v2025.66471.3"), NOT a
+    # git tag.  We resolve the actual local git tag via _build_tag_name and verify it
+    # exists locally before doing any remote checks.  If it doesn't exist locally we
+    # are in a fresh-release flow and skip this block entirely.
+    _current_branch_1_5 = get_current_branch(repo_path)
+    _ver_raw_1_5 = last_tag_full.lstrip('v') if last_tag_full else ""
+    _git_tag_1_5 = _build_tag_name(_ver_raw_1_5, _current_branch_1_5, repo_path) if _ver_raw_1_5 else ""
+    _local_tags_1_5 = run_git(["tag", "-l"], cwd=repo_path, check=False).splitlines() if _ver_raw_1_5 else []
+    _tag_exists_locally_1_5 = bool(_git_tag_1_5 and _git_tag_1_5 in _local_tags_1_5)
+
+    if current_ver == last_ver and _tag_exists_locally_1_5 and shutil.which("gh"):
 
         from . import pypi as _pypi
         _pkg_name = _pypi.read_package_name(repo_path) or ""
 
-        # Gather full state in one pass
-        gh_release   = get_gh_release_info(repo_path, last_tag_full)
-        tag_on_remote = check_remote_tag(repo_path, last_tag_full)
-        on_pypi      = check_pypi_version_exists(_pkg_name, last_tag_full) if _pkg_name else False
-        wf_running, wf_status = check_workflow_running(repo_path, last_tag_full)
+        # Gather full state in one pass (using the resolved git tag name)
+        gh_release    = get_gh_release_info(repo_path, _git_tag_1_5)
+        tag_on_remote = check_remote_tag(repo_path, _git_tag_1_5)
+        on_pypi       = check_pypi_version_exists(_pkg_name, last_tag_full) if _pkg_name else False
+        wf_running, wf_status = check_workflow_running(repo_path, _git_tag_1_5)
 
         # ── Push local tag that never made it to remote ───────────────────────
         if not tag_on_remote:
-            print(f"\n⚠️  Tag {last_tag_full} exists locally but NOT on remote.")
-            push_now = input("   Push it now? (y/n): ").strip().lower()
+            print(f"\n⚠️  UNPUSHED TAG DETECTED!")
+            print(f"   Git tag  : {_git_tag_1_5}")
+            print(f"   PyPI ver : {last_tag_full}")
+            print(f"   Tag exists locally but has not been pushed to remote.")
+            push_now = input(f"   Push {_git_tag_1_5} now? (y/n): ").strip().lower()
             if push_now == 'y':
                 try:
-                    run_git(["push", "origin", last_tag_full], cwd=repo_path)
+                    run_git(["push", "origin", _git_tag_1_5], cwd=repo_path)
                     tag_on_remote = True
                     print(f"  ✓ Tag pushed")
                 except Exception:
                     print("  ❌ Push failed — cannot continue")
                     return
             else:
-                print("  Skipped — cannot create release without remote tag.")
+                print(f"  Skipped. Push manually:  git push origin {_git_tag_1_5}")
                 return
 
         # ── SCENARIO A: Draft release exists ─────────────────────────────────
@@ -2202,7 +2477,8 @@ def _main_logic(repo_path: Path):
                 print(f"  ✓ Deleted local tag {tag}")
                 prev_tag = get_last_tag(repo_path)
                 print("\n📊 Reviewing changes before regenerating changelog...")
-                if not show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD"):
+                _rev_ok3, prev_tag = show_review_before_changelog(repo_path, prev_tag or get_first_commit_ref(repo_path), "HEAD")
+                if not _rev_ok3:
                     print("Release cancelled.")
                     return
                 draft, suggested_title = get_smart_changelog(repo_path, prev_tag, current_ver)
@@ -2236,7 +2512,7 @@ def _main_logic(repo_path: Path):
         cur_patch = int(_cve_match.group(3) or 0)
         base_ver  = f"{year}.{cve_num}"
         auto_next = f"{base_ver}.{cur_patch + 1}"
-        auto_tag  = _build_tag_name(auto_next, current_branch)
+        auto_tag  = _build_tag_name(auto_next, current_branch, repo_path)
 
         print(f"  Detected CVE version scheme  (branch: {current_branch})")
         print(f"\n  [1] Increment patch suffix   {current_ver} -> {auto_next}  (tag: {auto_tag})")
@@ -2263,7 +2539,7 @@ def _main_logic(repo_path: Path):
                 print(f"  ⚠️  '{new_ver}' may not be valid on PyPI. Continue anyway? [y/N]: ", end="")
                 if input().strip().lower() != 'y':
                     return
-            suggested_tag = _build_tag_name(new_ver, current_branch)
+            suggested_tag = _build_tag_name(new_ver, current_branch, repo_path)
             print(f"  Suggested tag: {suggested_tag}")
             custom_input = input(f"  Tag (enter to use suggested): ").strip()
             if custom_input:
@@ -2333,14 +2609,15 @@ def _main_logic(repo_path: Path):
     
     # Show review before changelog
     print("\n📊 Reviewing changes before generating changelog...")
-    if not show_review_before_changelog(repo_path, last_tag_full or "HEAD~10", "HEAD"):
+    _rev_continue, _resolved_from = show_review_before_changelog(repo_path, last_tag_full or "HEAD~10", "HEAD")
+    if not _rev_continue:
         print("Release cancelled. Reverting pyproject.toml...")
         content = toml.read_text()
         toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{current_ver}"', content, count=1, flags=re.MULTILINE))
         return
-    
-    # Changelog
-    draft, suggested_title = get_smart_changelog(repo_path, last_tag_full, new_ver)
+
+    # Changelog — use the ref the user actually picked, not the raw PyPI version string
+    draft, suggested_title = get_smart_changelog(repo_path, _resolved_from, new_ver)
     # Smart suffix for first release
     # Check if on PyPI to determine if first release
     # Check if ANY version on PyPI to determine if first release

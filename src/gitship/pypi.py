@@ -476,11 +476,25 @@ def create_github_release(repo_path: Path, tag: str, changelog: str, package_nam
         print(f"{Colors.YELLOW}⚠ GitHub CLI not found{Colors.RESET}")
         print(f"  Install with: {Colors.DIM}sudo apt install gh{Colors.RESET} or {Colors.DIM}brew install gh{Colors.RESET}")
         return False
-    
-    # Get owner and repo from git remote
+
+    # Ensure gh has a default repo — detect from 'origin' remote and set it.
+    # Without this, gh release create fails with "No default remote repository".
     owner, repo = get_github_repo_info(repo_path)
+    if owner and repo:
+        set_default = run_command(
+            ['gh', 'repo', 'set-default', f'{owner}/{repo}'],
+            cwd=repo_path
+        )
+        if set_default.returncode != 0:
+            print(f"{Colors.YELLOW}⚠ Could not set gh default repo to {owner}/{repo}{Colors.RESET}")
+            print(f"  Run manually: {Colors.DIM}gh repo set-default {owner}/{repo}{Colors.RESET}")
+            return False
+    else:
+        print(f"{Colors.RED}✗ Could not determine GitHub repo from 'origin' remote{Colors.RESET}")
+        print(f"  Run manually: {Colors.DIM}gh repo set-default <owner>/<repo>{Colors.RESET}")
+        return False
     
-    # Build release title
+    # Build release title  (owner/repo already resolved above)
     base_title = f'{package_name} {tag}' if package_name else tag
     if title_suffix:
         title = f"{base_title} - {title_suffix}"

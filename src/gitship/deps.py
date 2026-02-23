@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, Set, List, Optional, Tuple
 from .pypi import read_package_name
 from .config import get_ignored_dependencies, add_ignored_dependency
+import urllib.request
+import json
+import re   # already imported
 
 # Try to import omnipkg functions if available
 OMNIPKG_AVAILABLE = False
@@ -29,7 +32,6 @@ try:
     from sys import stdlib_module_names as STDLIB_MODULES
 except ImportError:
     STDLIB_MODULES = {"os", "sys", "re", "subprocess", "pathlib", "datetime", "collections", "tempfile", "shutil", "argparse", "ast", "glob", "time", "tomllib"}
-
 
 def is_stdlib_module(module_name: str) -> bool:
     """
@@ -91,6 +93,66 @@ def is_stdlib_module(module_name: str) -> bool:
     }
     return base_name in COMMON_STDLIBS
 
+def get_upstream_optional_deps(repo_path: Path) -> Set[str]:
+    """
+    Reads [tool.gitship] upstream = "package==version" from pyproject.toml,
+    queries PyPI for that version's requires_dist, and returns a set of
+    normalized package names that are only used in extras (optional).
+    """
+    pkg_name = None
+    version = None
+
+    toml_path = repo_path / "pyproject.toml"
+    if not toml_path.exists():
+        return set()
+
+    # Parse TOML (using tomllib if available, else fallback to regex)
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib
+    except ImportError:
+        # No TOML parser, can't read config
+        return set()
+
+    try:
+        with open(toml_path, 'rb') as f:
+            data = tomllib.load(f)
+    except Exception:
+        return set()
+
+    upstream = data.get('tool', {}).get('gitship', {}).get('upstream')
+    if upstream and isinstance(upstream, str) and '==' in upstream:
+        pkg_name, version = upstream.split('==', 1)
+    else:
+        return set()
+
+    # Fetch metadata from PyPI
+    url = f"https://pypi.org/pypi/{pkg_name}/{version}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            info = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"⚠️  Could not fetch upstream metadata: {e}")
+        return set()
+
+    requires_dist = info.get('info', {}).get('requires_dist')
+    if not requires_dist:
+        return set()
+
+    optional_pkgs = set()
+    for req in requires_dist:
+        # If the requirement contains an extra marker, it's optional
+        if 'extra == ' in req or ' and extra == ' in req:
+            # Extract base package name (ignore version specifiers and markers)
+            base_part = req.split(';', 1)[0].strip()
+            match = re.match(r'^([a-zA-Z0-9._-]+)', base_part)
+            if match:
+                pkg = match.group(1)
+                # Normalize to match the keys we use later (lowercase, hyphens)
+                optional_pkgs.add(pkg.lower().replace('_', '-'))
+    return optional_pkgs
 
 def convert_module_to_package_name(module_name: str, error_message: str = None) -> str:
     """
@@ -113,7 +175,6 @@ def convert_module_to_package_name(module_name: str, error_message: str = None) 
     }
     base = module_name.split('.')[0]
     return module_to_package.get(base, module_name)
-
 
 def find_project_imports(repo_path: Path, silent: bool = False) -> Dict[str, Set[str]]:
     """
@@ -392,14 +453,24 @@ def check_and_update_deps(repo_path: Path, silent: bool = False) -> bool:
     ignored_deps = set(get_ignored_dependencies(repo_path))
     if ignored_deps and not silent:
         print(f"[DEBUG] Permanently ignoring for this project: {', '.join(sorted(ignored_deps))}")
-
+    # Get set of optional packages from upstream (if configured)
+    optional_upstream = get_upstream_optional_deps(repo_path)
+    if optional_upstream and not silent:
+        print(f"ℹ  Auto-ignoring {len(optional_upstream)} optional upstream dependencies")
     # Identify new packages
     new_pkgs = []
     for pkg, files in pkg_usage.items():
         norm_pkg = pkg.lower().replace('_', '-')
         
-        # Skip if already in toml OR in permanent ignore list
-        if norm_pkg not in existing_deps_set and norm_pkg not in ignored_deps and pkg not in ignored_deps:
+        # Skip if permanently ignored or already in deps
+        if norm_pkg in existing_deps_set or norm_pkg in ignored_deps or pkg in ignored_deps:
+            continue
+
+        # NEW: skip if it's an optional extra of the upstream package
+        if norm_pkg in optional_upstream:
+            if not silent:
+                print(f"ℹ  Auto-ignored {pkg} (optional extra of upstream)")
+            continue
             # Determine default category based on file locations
             has_test_files = any('test' in str(f) for f in files)
             has_non_test_files = any('test' not in str(f) for f in files)

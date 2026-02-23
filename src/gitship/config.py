@@ -43,6 +43,7 @@ def load_config() -> Dict[str, Any]:
             "default_commit_count": 10,
             "project_ignored_deps": {},  # Format: {"project_path": ["dep1", "dep2"]}
             "project_ignore_patterns": {},  # Format: {"project_path": ["*.po", "*.mo"]}
+            "project_tag_suffix": {},       # Format: {"project_path": "-py37"}  (empty string = no suffix)
         }
     
     try:
@@ -56,6 +57,8 @@ def load_config() -> Dict[str, Any]:
             # Add project_ignore_patterns if missing
             if "project_ignore_patterns" not in config:
                 config["project_ignore_patterns"] = {}
+            if "project_tag_suffix" not in config:
+                config["project_tag_suffix"] = {}
             return config
     except Exception:
         # Return defaults on error
@@ -65,6 +68,7 @@ def load_config() -> Dict[str, Any]:
             "default_commit_count": 10,
             "project_ignored_deps": {},
             "project_ignore_patterns": {},
+            "project_tag_suffix": {},
         }
 
 
@@ -172,6 +176,42 @@ def list_ignored_dependencies_for_project(project_path: Path = None):
         print("  (none)")
     print()
 
+def set_project_tag_suffix(suffix: str, project_path: Path = None):
+    """
+    Set a custom git tag branch-suffix for this project.
+
+    Examples
+    --------
+    gitship config --set-tag-suffix -py37   # CVE-2026-21441-py37
+    gitship config --set-tag-suffix ""      # no suffix (main-style tags)
+
+    The suffix is appended after the base CVE tag (and optional .N patch number).
+    Overrides the automatic branch-name detection in _build_tag_name.
+    """
+    config = load_config()
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    if "project_tag_suffix" not in config:
+        config["project_tag_suffix"] = {}
+    config["project_tag_suffix"][project_key] = suffix
+    save_config(config)
+    if suffix:
+        print(f"Tag suffix for this project set to: '{suffix}'")
+        print(f"  CVE tags will look like: CVE-YYYY-NNNNN{suffix}")
+    else:
+        print("Tag suffix cleared — tags will use main-style (no branch suffix).")
+
+
+def get_project_tag_suffix(project_path: Path = None) -> str | None:
+    """Return the configured tag suffix for this project, or None if not set."""
+    config = load_config()
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    return config.get("project_tag_suffix", {}).get(project_key)
+
+
 def show_config():
     """Display current configuration."""
     config = load_config()
@@ -205,9 +245,22 @@ def show_config():
             print(f"    {project_name}: {', '.join(patterns) if patterns else '(none)'}")
     else:
         print(f"  Ignore Patterns:    (defaults: *.po, *.mo)")
-        
+
+    # Show per-project tag suffixes
+    project_tag_suffixes = config.get("project_tag_suffix", {})
+    if project_tag_suffixes:
+        print("\n  Project-specific git tag suffixes:")
+        for project, sfx in project_tag_suffixes.items():
+            project_name = Path(project).name
+            display = f"'{sfx}'" if sfx else "(none — main-style)"
+            print(f"    {project_name}: {display}  →  e.g. CVE-YYYY-NNNNN{sfx}")
+    else:
+        print(f"  Tag Suffix:         (auto from branch name, lts- prefix stripped)")
+
     print()
     print("To modify settings:")
     print("  gitship config --set-export-path /path/to/export")
+    print("  gitship config --set-tag-suffix -py37")
+    print("  gitship config --set-tag-suffix \"\"  # clear suffix (main-style)")
     print(f"  Or edit: {get_config_file()}")
     print()

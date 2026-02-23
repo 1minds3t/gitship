@@ -59,6 +59,34 @@ def strip_ansi(text: str) -> str:
     return ansi_escape.sub('', text)
 
 
+def _is_binary_file(path: Path) -> bool:
+    """Return True if the file appears to be binary (contains null bytes in first 8KB)."""
+    try:
+        with open(path, 'rb') as f:
+            chunk = f.read(8192)
+        return b'\x00' in chunk
+    except Exception:
+        return False
+
+
+def _dir_stats(dir_path: Path, repo_path: Path) -> Tuple[int, int, int]:
+    """Walk a directory and return (file_count, text_line_count, binary_count)."""
+    text_lines = 0
+    binary_count = 0
+    file_count = 0
+    for sub in sorted(dir_path.rglob('*')):
+        if sub.is_file():
+            file_count += 1
+            if _is_binary_file(sub):
+                binary_count += 1
+            else:
+                try:
+                    text_lines += sum(1 for _ in open(sub, 'r', encoding='utf-8', errors='ignore'))
+                except Exception:
+                    pass
+    return file_count, text_lines, binary_count
+
+
 class ChangeAnalyzer:
     """Analyze git changes and categorize them intelligently."""
     
@@ -77,13 +105,23 @@ class ChangeAnalyzer:
     
     def run_git(self, args: List[str]) -> subprocess.CompletedProcess:
         """Run a git command."""
-        return subprocess.run(
+        result = subprocess.run(
             ["git"] + args,
             cwd=self.repo_path,
             capture_output=True,
-            text=True,
             check=False
         )
+        # Decode stdout safely — binary files (e.g. .patch with embedded gzip)
+        # will fail UTF-8 decoding, so fall back to latin-1 which never errors
+        try:
+            result.stdout = result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            result.stdout = result.stdout.decode("latin-1")
+        try:
+            result.stderr = result.stderr.decode("utf-8")
+        except UnicodeDecodeError:
+            result.stderr = result.stderr.decode("latin-1")
+        return result
     
     def analyze_changes(self) -> Dict:
         """Analyze all changes in the repository."""
@@ -657,15 +695,29 @@ class CommitMessageBuilder:
             return header
     
     def _suggest_code_message(self) -> str:
-        """Suggest a message for code changes."""
+        """Suggest a message for code changes.
+
+        Single file  → "Update retry"  (stem, normalized)
+        2-3 files    → "Update retry, connection pool"
+        4+ files     → "Update 5 code files"
+        """
+        def _normalize(path: str) -> str:
+            stem = Path(path).stem           # e.g. test_connection_pool
+            stem = stem.removeprefix("test_")  # strip test_ prefix for display
+            return stem.replace('_', ' ')    # underscores → spaces
+
         code_files = self.analyzer.changes['code']
-        
-        if len(code_files) == 1:
-            filepath = code_files[0]['path']
-            module_name = Path(filepath).stem
-            return f"Update {module_name}"
+        n = len(code_files)
+
+        if n == 0:
+            return "Update code"
+        elif n == 1:
+            return f"Update {_normalize(code_files[0]['path'])}"
+        elif n <= 3:
+            names = ', '.join(_normalize(f['path']) for f in code_files)
+            return f"Update {names}"
         else:
-            return f"Update {len(code_files)} code files"
+            return f"Update {n} code files"
     
     def _suggest_translation_message(self) -> str:
         """Suggest a message for translation changes."""
@@ -693,19 +745,56 @@ class CommitMessageBuilder:
             return f"Update translation files ({lang_count} languages)"
 
 
-def pick_files_to_review(files: List[Dict]) -> List[Dict]:
+def _expand_dir_entry(item: Dict, repo_path: Path) -> List[Dict]:
+    """
+    If item is a directory (path ends with / or is a dir on disk), return one
+    synthetic entry per file inside it.  Otherwise return [item] unchanged.
+    Each expanded entry carries '_dir_parent' so callers can collapse back.
+    """
+    if 'old' in item:
+        return [item]  # rename — never expand
+    raw_path = item['path'].rstrip('/')
+    abs_path = repo_path / raw_path
+    if not abs_path.is_dir():
+        return [item]
+    children = []
+    for sub in sorted(abs_path.rglob('*')):
+        if sub.is_file():
+            rel = str(sub.relative_to(repo_path))
+            children.append({
+                'path': rel,
+                'status': item['status'],
+                '_dir_parent': raw_path,
+                '_original': item,
+            })
+    return children if children else [item]
+
+
+def pick_files_to_review(files: List[Dict], repo_path: Path = None) -> List[Dict]:
     """Show a numbered list and let the user exclude files before reviewing.
-    
+
+    Directories are expanded inline so individual files inside can be excluded
+    independently (e.g. keep review.md, exclude check.md from security/analysis/).
     Returns the filtered list (all files if user skips / presses Enter).
     """
     if len(files) <= 1:
-        return files  # Nothing to exclude
+        return files
+
+    # Expand directories into their constituent files for fine-grained selection
+    flat: List[Dict] = []
+    if repo_path:
+        for item in files:
+            flat.extend(_expand_dir_entry(item, repo_path))
+    else:
+        flat = list(files)
 
     print()
     print("  Files included in this review:")
-    for i, item in enumerate(files, 1):
+    for i, item in enumerate(flat, 1):
         if 'old' in item:
             label = f"{item['old']} → {item['new']}"
+        elif item.get('_dir_parent'):
+            label = f"  ↳ {item['path']}  {Colors.DIM}(in {item['_dir_parent']}/){Colors.RESET}"
         else:
             label = item['path']
         print(f"    {i:2}. {label}")
@@ -718,22 +807,22 @@ def pick_files_to_review(files: List[Dict]) -> List[Dict]:
         return files
 
     if not raw:
-        return files
+        return flat if repo_path else files
 
     excluded_idxs = set()
     for part in raw.split():
         try:
             n = int(part)
-            if 1 <= n <= len(files):
+            if 1 <= n <= len(flat):
                 excluded_idxs.add(n - 1)
         except ValueError:
             pass
 
     if not excluded_idxs:
-        return files
+        return flat if repo_path else files
 
-    kept = [f for i, f in enumerate(files) if i not in excluded_idxs]
-    print(f"  → Showing {len(kept)} of {len(files)} files")
+    kept = [f for i, f in enumerate(flat) if i not in excluded_idxs]
+    print(f"  → Showing {len(kept)} of {len(flat)} files")
     return kept
 
 
@@ -747,7 +836,7 @@ def show_diff_menu(analyzer: ChangeAnalyzer, category: str, files: List[Dict]):
     has_renames = files and 'old' in files[0]
 
     # Let user exclude specific files before reviewing
-    files = pick_files_to_review(files)
+    files = pick_files_to_review(files, repo_path=analyzer.repo_path)
     if not files:
         print("  (all files excluded — nothing to review)")
         return
@@ -886,34 +975,92 @@ def show_shortstat(analyzer: ChangeAnalyzer, files: List[Dict]):
         input("Press Enter to continue...")
         return
     
-    # Get paths for git command
-    paths = [f['path'] for f in files]
-    
-    # Show shortstat for modified files
-    modified_paths = [f['path'] for f in files if f['status'].strip() in ('M', 'MM') or 'M' in f['status']]
+    # ── Modified files: real git shortstat ──────────────────────────────────
+    modified_paths = [f['path'] for f in files
+                      if 'M' in f.get('status','') and '_dir_parent' not in f]
+
+    total_ins = 0
+    total_dels = 0
+    mod_file_count = 0
+
     if modified_paths:
-        # Try staged first (covers 'A ', 'M '), then unstaged, then HEAD
-        result = analyzer.run_git(["diff", "--shortstat", "--staged", "--"] + modified_paths)
-        
-        if result.returncode != 0 or not result.stdout.strip():
-            result = analyzer.run_git(["diff", "--shortstat", "--"] + modified_paths)
-        
-        if result.returncode != 0 or not result.stdout.strip():
-            result = analyzer.run_git(["diff", "--shortstat", "HEAD", "--"] + modified_paths)
-        
-        if result.returncode == 0 and result.stdout.strip():
-            print("\nModified files:")
-            print(result.stdout)
-    
-    # Count new/deleted files
-    new_count = sum(1 for f in files if f['status'].strip() in ('??', 'A') or f['status'][:1] == 'A')
-    deleted_count = sum(1 for f in files if f['status'] == 'D')
-    
-    if new_count > 0:
-        print(f"\nNew files: {new_count}")
-    if deleted_count > 0:
-        print(f"Deleted files: {deleted_count}")
-    
+        for attempt in (
+            ["diff", "--shortstat", "--staged", "--"],
+            ["diff", "--shortstat", "--"],
+            ["diff", "--shortstat", "HEAD", "--"],
+        ):
+            result = analyzer.run_git(attempt + modified_paths)
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse "N files changed, X insertions(+), Y deletions(-)"
+                m_ins  = re.search(r'(\d+) insertion', result.stdout)
+                m_dels = re.search(r'(\d+) deletion',  result.stdout)
+                m_fc   = re.search(r'(\d+) file',      result.stdout)
+                total_ins  += int(m_ins.group(1))  if m_ins  else 0
+                total_dels += int(m_dels.group(1)) if m_dels else 0
+                mod_file_count = int(m_fc.group(1)) if m_fc else len(modified_paths)
+                break
+
+    # ── New / untracked files: walk dirs, count lines ─────────────────────
+    new_lines = 0
+    new_file_count = 0
+    new_file_details: List[Tuple[str, int, bool]] = []  # (path, lines, is_binary)
+    for f in files:
+        s = f.get('status', '').strip()
+        if s not in ('??', 'A') and f.get('status','')[:1] != 'A':
+            continue
+        fp = analyzer.repo_path / f['path'].rstrip('/')
+        if fp.is_dir():
+            for sub in sorted(fp.rglob('*')):
+                if sub.is_file():
+                    rel = str(sub.relative_to(analyzer.repo_path))
+                    if _is_binary_file(sub):
+                        new_file_count += 1
+                        new_file_details.append((rel, 0, True))
+                    else:
+                        try:
+                            lc = sum(1 for _ in open(sub, 'r', encoding='utf-8', errors='ignore'))
+                        except Exception:
+                            lc = 0
+                        new_file_count += 1
+                        new_lines += lc
+                        new_file_details.append((rel, lc, False))
+        elif fp.is_file():
+            new_file_count += 1
+            if _is_binary_file(fp):
+                new_file_details.append((str(f['path']), 0, True))
+            else:
+                try:
+                    lc = sum(1 for _ in open(fp, 'r', encoding='utf-8', errors='ignore'))
+                except Exception:
+                    lc = 0
+                new_lines += lc
+                new_file_details.append((str(f['path']), lc, False))
+
+    deleted_count = sum(1 for f in files if f.get('status','').strip() == 'D')
+
+    # ── Print unified summary ─────────────────────────────────────────────
+    total_file_count = mod_file_count + new_file_count + deleted_count
+    parts = []
+    if total_file_count:
+        parts.append(f"{total_file_count} file(s) changed")
+    if total_ins or new_lines:
+        parts.append(f"{total_ins + new_lines} insertions(+)")
+    if total_dels:
+        parts.append(f"{total_dels} deletions(-)")
+
+    if parts:
+        print()
+        print("  " + ",  ".join(parts))
+    if new_file_count:
+        print(f"  {new_file_count} new file(s)  (~{new_lines} lines)")
+        for (fpath, lc, is_bin) in new_file_details:
+            if is_bin:
+                print(f"    📦 {fpath}  [binary]")
+            else:
+                print(f"    📄 {fpath}  ({lc} lines)")
+    if deleted_count:
+        print(f"  {deleted_count} deleted file(s)")
+
     print()
     input("Press Enter to continue...")
 
@@ -1093,35 +1240,62 @@ def export_diff_to_file(analyzer: ChangeAnalyzer, files: List[Dict], category: s
                     
                     # Handle untracked/new files differently
                     if status in ('??', 'A'):
-                        # For new files, show the full content (not a diff)
+                        # Could be a plain file, a binary, or an entire directory
                         try:
                             new_file = analyzer.repo_path / path
-                            if new_file.exists() and new_file.is_file():
-                                with open(new_file, 'r', encoding='utf-8', errors='ignore') as nf:
-                                    content = nf.read()
-                                
-                                # In condensed mode, remove excessive blank lines
-                                if use_condensed:
-                                    lines = content.split('\n')
-                                    filtered_lines = []
-                                    prev_blank = False
-                                    
-                                    for line in lines:
-                                        is_blank = not line.strip()
-                                        
-                                        # Skip consecutive blank lines
-                                        if is_blank and prev_blank:
-                                            continue
-                                        
-                                        filtered_lines.append(line)
-                                        prev_blank = is_blank
-                                    
-                                    content = '\n'.join(filtered_lines)
-                                    
-                                f.write(f"NEW FILE - Full content:\n")
-                                f.write("-" * 80 + "\n")
-                                f.write(content)
-                                f.write("\n\n")
+                            if new_file.is_dir():
+                                sub_files = sorted(sf for sf in new_file.rglob('*') if sf.is_file())
+                                f.write(f"NEW DIRECTORY ({len(sub_files)} file(s)):\n\n")
+                                for sub in sub_files:
+                                    rel = str(sub.relative_to(analyzer.repo_path))
+                                    f.write(f"  {'-' * 60}\n")
+                                    if _is_binary_file(sub):
+                                        size_kb = sub.stat().st_size / 1024
+                                        f.write(f"  FILE: {rel}  [BINARY - {size_kb:.1f} KB - skipped]\n\n")
+                                    else:
+                                        try:
+                                            sub_content = sub.read_text(encoding='utf-8', errors='ignore')
+                                            if use_condensed:
+                                                clines = sub_content.split('\n')
+                                                filtered_lines = []
+                                                prev_blank = False
+                                                for cline in clines:
+                                                    is_blank = not cline.strip()
+                                                    if is_blank and prev_blank:
+                                                        continue
+                                                    filtered_lines.append(cline)
+                                                    prev_blank = is_blank
+                                                sub_content = '\n'.join(filtered_lines)
+                                            line_count = sub_content.count('\n') + 1
+                                            f.write(f"  FILE: {rel}  ({line_count} lines)\n")
+                                            f.write(f"  {'-' * 60}\n")
+                                            for cline in sub_content.splitlines():
+                                                f.write(f"  +{cline}\n")
+                                            f.write("\n")
+                                        except Exception as sub_e:
+                                            f.write(f"  FILE: {rel}  (error reading: {sub_e})\n\n")
+                            elif new_file.exists() and new_file.is_file():
+                                if _is_binary_file(new_file):
+                                    size_kb = new_file.stat().st_size / 1024
+                                    f.write(f"NEW BINARY FILE - {size_kb:.1f} KB (skipped)\n\n")
+                                else:
+                                    with open(new_file, 'r', encoding='utf-8', errors='ignore') as nf:
+                                        content = nf.read()
+                                    if use_condensed:
+                                        lines = content.split('\n')
+                                        filtered_lines = []
+                                        prev_blank = False
+                                        for line in lines:
+                                            is_blank = not line.strip()
+                                            if is_blank and prev_blank:
+                                                continue
+                                            filtered_lines.append(line)
+                                            prev_blank = is_blank
+                                        content = '\n'.join(filtered_lines)
+                                    f.write(f"NEW FILE - Full content:\n")
+                                    f.write("-" * 80 + "\n")
+                                    f.write(content)
+                                    f.write("\n\n")
                             else:
                                 f.write("(file not found or not readable)\n\n")
                         except Exception as e:
@@ -1270,7 +1444,14 @@ def show_stat(analyzer: ChangeAnalyzer, files: List[Dict]):
         filepath = item['path']
         status = item['status']
         
-        print(f"\n📄 {filepath}")
+        abs_path = analyzer.repo_path / filepath
+        if abs_path.is_dir():
+            print(f"\n📁 {filepath}/")
+        elif _is_binary_file(abs_path):
+            size_kb = abs_path.stat().st_size / 1024 if abs_path.exists() else 0
+            print(f"\n📦 {filepath}  {Colors.DIM}[binary - {size_kb:.1f} KB]{Colors.RESET}")
+        else:
+            print(f"\n📄 {filepath}")
         
         # Check if this is actually a renamed file showing in code section
         if 'rename_from' in item:
@@ -1311,31 +1492,63 @@ def show_stat(analyzer: ChangeAnalyzer, files: List[Dict]):
             is_new = x_col in ('A', '?') or y_col in ('?',)
             
             if is_new or status.strip() in ('??', 'A'):
-                # New / untracked file — just report line count
-                try:
-                    with open(analyzer.repo_path / filepath, 'r') as f:
-                        lines = len(f.readlines())
-                    print(f"  [NEW FILE - {lines} lines]")
-                except Exception:
-                    print("  [NEW FILE]")
+                # New / untracked — could be a file, binary, or directory
+                abs_path = analyzer.repo_path / filepath
+                if abs_path.is_dir():
+                    file_count, text_lines, binary_count = _dir_stats(abs_path, analyzer.repo_path)
+                    parts = [f"{file_count} file(s)"]
+                    if text_lines:
+                        parts.append(f"{text_lines} text lines")
+                    if binary_count:
+                        parts.append(f"{binary_count} binary")
+                    print(f"  [NEW DIRECTORY - {', '.join(parts)}]")
+                    # Show per-file breakdown
+                    for sub in sorted(abs_path.rglob('*')):
+                        if sub.is_file():
+                            rel = sub.relative_to(analyzer.repo_path)
+                            if _is_binary_file(sub):
+                                size_kb = sub.stat().st_size / 1024
+                                print(f"    📦 {rel}  [BINARY - {size_kb:.1f} KB]")
+                            else:
+                                try:
+                                    line_count = sum(1 for _ in open(sub, 'r', encoding='utf-8', errors='ignore'))
+                                    print(f"    📄 {rel}  ({line_count} lines)")
+                                except Exception:
+                                    print(f"    📄 {rel}")
+                elif _is_binary_file(abs_path):
+                    size_kb = abs_path.stat().st_size / 1024
+                    print(f"  [NEW BINARY FILE - {size_kb:.1f} KB]")
+                else:
+                    try:
+                        with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines = len(f.readlines())
+                        print(f"  [NEW FILE - {lines} lines]")
+                    except Exception:
+                        print("  [NEW FILE]")
             else:
-                # Modified file — try staged first (covers 'M ', 'A '), then unstaged, then HEAD
-                result = analyzer.run_git(["diff", "--stat", "--staged", "--", filepath])
-                
-                if result.returncode != 0 or not result.stdout.strip():
-                    result = analyzer.run_git(["diff", "--stat", "--", filepath])
-                
-                if result.returncode != 0 or not result.stdout.strip():
-                    result = analyzer.run_git(["diff", "--stat", "HEAD", "--", filepath])
-                
-                if result.returncode == 0 and result.stdout.strip():
-                    stat_lines = result.stdout.strip().split("\n")
-                    for line in stat_lines:
-                        if filepath in line or "|" in line:
-                            print(f"  {line}")
-                            break
-                    else:
-                        print(f"  {result.stdout.strip()}")
+                # Modified file — skip diff for binaries
+                abs_path_check = analyzer.repo_path / filepath
+                if abs_path_check.exists() and _is_binary_file(abs_path_check):
+                    size_kb = abs_path_check.stat().st_size / 1024
+                    print(f"  [BINARY FILE - {size_kb:.1f} KB, modified]")
+                else:
+                    # Modified file — try staged first (covers 'M ', 'A '), then unstaged, then HEAD
+                    result = analyzer.run_git(["diff", "--stat", "--staged", "--", filepath])
+                    
+                    if result.returncode != 0 or not result.stdout.strip():
+                        result = analyzer.run_git(["diff", "--stat", "--", filepath])
+                    
+                    if result.returncode != 0 or not result.stdout.strip():
+                        result = analyzer.run_git(["diff", "--stat", "HEAD", "--", filepath])
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        stat_lines = result.stdout.strip().split("\n")
+                        for line in stat_lines:
+                            if filepath in line or "|" in line:
+                                print(f"  {line}")
+                                break
+                        else:
+                            print(f"  {result.stdout.strip()}")
     
     print()
     input("Press Enter to continue...")
@@ -1390,7 +1603,23 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
     for item in files:
         filepath = item['path']
         status = item['status']
-        
+
+        abs_path_check = analyzer.repo_path / filepath
+        if abs_path_check.is_file() and _is_binary_file(abs_path_check):
+            try:
+                size = abs_path_check.stat().st_size
+                for unit in ("B", "KB", "MB", "GB"):
+                    if size < 1024 or unit == "GB":
+                        size_str = f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+                        break
+                    size /= 1024
+            except OSError:
+                size_str = "unknown size"
+            print(f"\n📦 {filepath}")
+            print("-" * 80)
+            print(f"  [binary file — {size_str}]")
+            continue
+
         print(f"\n📄 {filepath}")
         print("-" * 80)
         
@@ -1428,15 +1657,32 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
             except Exception as e:
                 print(f"Could not generate diff: {e}")
         
-        elif status == 'D':
+        elif 'D' in status:
             result = analyzer.run_git(["show", f"HEAD:{filepath}"])
             if result.returncode == 0:
                 content = result.stdout
-                lines = content.split('\n')
-                preview = '\n'.join(lines[:30])
-                print(f"DELETED FILE - Last content ({len(lines)} lines):\n{preview}")
-                if len(lines) > 30:
-                    print(f"\n... ({len(lines) - 30} more lines)")
+                non_printable = sum(1 for c in content[:4096] if not c.isprintable() and c not in '\n\r\t')
+                if non_printable > 20:
+                    size_result = analyzer.run_git(["cat-file", "-s", f"HEAD:{filepath}"])
+                    if size_result.returncode == 0:
+                        try:
+                            sz = int(size_result.stdout.strip())
+                            for unit in ("B", "KB", "MB", "GB"):
+                                if sz < 1024 or unit == "GB":
+                                    size_str = f"{sz:.1f} {unit}" if unit != "B" else f"{sz} B"
+                                    break
+                                sz /= 1024
+                        except ValueError:
+                            size_str = "unknown size"
+                    else:
+                        size_str = "unknown size"
+                    print(f"  [binary/non-printable content — {size_str}]  DELETED")
+                else:
+                    lines = content.split('\n')
+                    preview = '\n'.join(lines[:30])
+                    print(f"DELETED FILE - Last content ({len(lines)} lines):\n{preview}")
+                    if len(lines) > 30:
+                        print(f"\n... ({len(lines) - 30} more lines)")
         
         elif status in ('??', 'A'):
             abs_path = analyzer.repo_path / filepath
@@ -1446,6 +1692,10 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
                 print(f"NEW DIRECTORY ({len(file_entries)} files):")
                 for sub in file_entries:
                     rel = sub.relative_to(analyzer.repo_path)
+                    if _is_binary_file(sub):
+                        size_kb = sub.stat().st_size / 1024
+                        print(f"\n  📦 {rel}  [binary — {size_kb:.1f} KB]")
+                        continue
                     try:
                         sub_content = sub.read_text(encoding='utf-8', errors='replace')
                         sub_lines = sub_content.split('\n')
@@ -1469,7 +1719,6 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
                     print(f"  (Could not read: {e})")
         
         else:
-            # Catch-all: handles M, MM, M , ' M', 'A ', 'A', and any other status.
             x_col = status[0] if len(status) >= 1 else ' '
             y_col = status[1] if len(status) >= 2 else ' '
             
@@ -1498,20 +1747,28 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
                     except Exception as e:
                         print(f"  (Could not read: {e})")
                         printed_raw = True
-            
+
             if not printed_raw:
                 if result is not None and result.stdout:
-                    lines = result.stdout.splitlines()
-                    cleaned_lines = []
-                    for line in lines:
-                        plain = strip_ansi(line)
-                        if plain.startswith(('diff --git', 'index ', '---', '+++')):
-                            continue
-                        cleaned_lines.append(line)
-                    if cleaned_lines:
-                        print('\n'.join(cleaned_lines))
+                    raw_out = result.stdout
+                    # Strip ANSI codes before checking for non-printable chars
+                    # (color codes would otherwise trigger the binary guard on normal diffs)
+                    plain_out = strip_ansi(raw_out)
+                    non_printable = sum(1 for c in plain_out[:4096] if not c.isprintable() and c not in '\n\r\t')
+                    if non_printable > 20:
+                        print(f"{Colors.DIM}  [diff contains binary/non-printable content — skipped]{Colors.RESET}")
                     else:
-                        print(f"{Colors.DIM}(no diff content){Colors.RESET}")
+                        lines = raw_out.splitlines()
+                        cleaned_lines = []
+                        for line in lines:
+                            plain = strip_ansi(line)
+                            if plain.startswith(('diff --git', 'index ', '---', '+++')):
+                                continue
+                            cleaned_lines.append(line)
+                        if cleaned_lines:
+                            print('\n'.join(cleaned_lines))
+                        else:
+                            print(f"{Colors.DIM}(no diff content){Colors.RESET}")
                 else:
                     print(f"{Colors.DIM}(no changes detected){Colors.RESET}")
     
@@ -1520,41 +1777,75 @@ def show_full_diff(analyzer: ChangeAnalyzer, files: List[Dict]):
 
 
 def show_combined_shortstat(analyzer: ChangeAnalyzer):
-    """Show shortstat for ALL changes combined (staged + unstaged + untracked)."""
+    """Show shortstat for ALL changes combined (staged + unstaged + untracked).
+
+    Translation files that are in the gitops ignore list are shown separately
+    so they don't inflate the unstaged count and confuse the reviewer.
+    """
+    # Collect translation paths so we can label them separately
+    trans_paths: set = set()
+    for lang_files in analyzer.changes['translations'].values():
+        for f in lang_files:
+            trans_paths.add(f['path'])
+
     # Staged changes
     result_staged = analyzer.run_git(["diff", "--shortstat", "--staged"])
     staged_text = result_staged.stdout.strip() if result_staged.returncode == 0 else ""
-    
-    # Unstaged changes
-    result_unstaged = analyzer.run_git(["diff", "--shortstat"])
-    unstaged_text = result_unstaged.stdout.strip() if result_unstaged.returncode == 0 else ""
-    
-    # Count untracked files
+
+    # Unstaged changes — break into ignored (translations) vs real
+    result_unstaged_full = analyzer.run_git(["diff", "--name-only"])
+    unstaged_ignored: List[str] = []
+    unstaged_real: List[str] = []
+    if result_unstaged_full.returncode == 0:
+        for fp in result_unstaged_full.stdout.strip().splitlines():
+            fp = fp.strip()
+            if not fp:
+                continue
+            if fp in trans_paths:
+                unstaged_ignored.append(fp)
+            else:
+                unstaged_real.append(fp)
+
+    unstaged_text = ""
+    if unstaged_real:
+        r = analyzer.run_git(["diff", "--shortstat", "--"] + unstaged_real)
+        if r.returncode == 0:
+            unstaged_text = r.stdout.strip()
+
+    # Untracked files — walk dirs properly
     result_status = analyzer.run_git(["status", "--porcelain"])
     untracked_count = 0
     untracked_lines = 0
     if result_status.returncode == 0:
         for line in result_status.stdout.strip().split('\n'):
-            if line.startswith('??'):
+            if not line.startswith('??'):
+                continue
+            filepath = line[3:].strip()
+            file_path = analyzer.repo_path / filepath.rstrip('/')
+            if file_path.is_dir():
+                fc, tl, _ = _dir_stats(file_path, analyzer.repo_path)
+                untracked_count += fc
+                untracked_lines += tl
+            elif file_path.is_file():
                 untracked_count += 1
-                filepath = line[3:].strip()
                 try:
-                    file_path = analyzer.repo_path / filepath
-                    if file_path.is_file():
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            untracked_lines += len(f.readlines())
-                except:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        untracked_lines += len(f.readlines())
+                except Exception:
                     pass
-    
+
     print(f"{Colors.BOLD}Overall changes:{Colors.RESET}")
     if staged_text:
         print(f"  {Colors.CYAN}Staged:{Colors.RESET} {staged_text}")
     if unstaged_text:
         print(f"  {Colors.YELLOW}Unstaged:{Colors.RESET} {unstaged_text}")
+    if unstaged_ignored:
+        print(f"  {Colors.MAGENTA}Ignored (translations — commit separately):{Colors.RESET} "
+              f"{len(unstaged_ignored)} file(s)")
     if untracked_count > 0:
-        print(f"  {Colors.GREEN}Untracked:{Colors.RESET} {untracked_count} new files (~{untracked_lines} lines)")
-    
-    if not staged_text and not unstaged_text and untracked_count == 0:
+        print(f"  {Colors.GREEN}Untracked:{Colors.RESET} {untracked_count} new file(s) (~{untracked_lines} lines)")
+
+    if not staged_text and not unstaged_text and not unstaged_ignored and untracked_count == 0:
         print(f"{Colors.DIM}(no changes){Colors.RESET}")
 
 
@@ -1870,7 +2161,25 @@ def commit_translations_only(analyzer: ChangeAnalyzer):
 
     type_map = {'1': 'chore', '2': 'feat', '3': 'fix', '4': 'i18n'}
     commit_type = type_map.get(type_choice, '')
-    first_line = f"{commit_type}: {title}" if commit_type else title
+
+    commit_scope = ''
+    if commit_type:
+        print()
+        print(f"Scope (optional — e.g. {commit_type}(daemon): or {commit_type}(i18n):)")
+        print(f"Press Enter to skip → {commit_type}: …")
+        try:
+            raw_scope = input("Scope: ").strip().strip("()")
+            commit_scope = raw_scope
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nCancelled.")
+            return False
+
+    if commit_type and commit_scope:
+        first_line = f"{commit_type}({commit_scope}): {title}"
+    elif commit_type:
+        first_line = f"{commit_type}: {title}"
+    else:
+        first_line = title
 
     # ── Step: Description / body (optional) ──────────────────────────────────
     print()
@@ -2110,6 +2419,7 @@ def interactive_commit(analyzer: ChangeAnalyzer):
     print()
     
     commit_type = ""
+    commit_scope = ""
     try:
         type_choice = input("Choose type (0-9, or Enter to skip): ").strip()
         type_map = {
@@ -2122,9 +2432,26 @@ def interactive_commit(analyzer: ChangeAnalyzer):
     except (KeyboardInterrupt, EOFError):
         print("\n\nCommit cancelled.")
         return False
-    
+
+    # Step 1b: Optional scope  →  fix(daemon):  feat(retry):  chore(security):
+    if commit_type:
+        print()
+        print(f"{Colors.BOLD}Step 1b: Scope (optional){Colors.RESET}")
+        print(f"Add a scope for {Colors.GREEN}{commit_type}(…):{Colors.RESET}  e.g. daemon, retry, security, auth")
+        print(f"Press Enter to skip → {Colors.DIM}{commit_type}: …{Colors.RESET}")
+        print()
+        try:
+            raw_scope = input("Scope: ").strip()
+            # Strip any surrounding parens the user might have typed
+            commit_scope = raw_scope.strip("()")
+            if commit_scope:
+                print(f"  → Prefix will be: {Colors.GREEN}{commit_type}({commit_scope}):{Colors.RESET}")
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nCommit cancelled.")
+            return False
+
     print()
-    
+
     # Option 2: Write custom title (optional)
     print(f"{Colors.BOLD}Step 2: Commit Title (optional){Colors.RESET}")
     print(f"Write a short title, or press Enter to use the suggested one:")
@@ -2256,14 +2583,22 @@ def interactive_commit(analyzer: ChangeAnalyzer):
     
     # Build final commit message
     final_message_parts = []
-    
-    # Add type prefix and title
-    if commit_type and custom_title:
-        final_message_parts.append(f"{commit_type}: {custom_title}")
+
+    # Assemble type(scope): prefix
+    if commit_type and commit_scope:
+        type_prefix = f"{commit_type}({commit_scope})"
     elif commit_type:
+        type_prefix = commit_type
+    else:
+        type_prefix = ""
+
+    # Add type prefix and title
+    if type_prefix and custom_title:
+        final_message_parts.append(f"{type_prefix}: {custom_title}")
+    elif type_prefix:
         # Type but no custom title - use suggested title without the breakdown
         suggested_title = suggested.split('\n')[0]
-        final_message_parts.append(f"{commit_type}: {suggested_title}")
+        final_message_parts.append(f"{type_prefix}: {suggested_title}")
     elif custom_title:
         final_message_parts.append(custom_title)
     else:
@@ -2392,144 +2727,219 @@ def interactive_commit(analyzer: ChangeAnalyzer):
 
 
 def clean_untracked_files(analyzer: ChangeAnalyzer):
-    """Interactive cleanup of untracked files."""
-    # Get all untracked files
+    """Interactive cleanup of untracked files.
+    
+    Directories are expanded inline so individual files inside can be selected
+    and deleted independently — useful for keeping some files while removing others.
+    """
+    import shutil
+
+    # Get all untracked entries from git
     result = analyzer.run_git(["status", "--porcelain"])
     if result.returncode != 0:
         print("Error getting file status.")
         return
-    
-    untracked = []
+
+    top_level_untracked = []
     for line in result.stdout.strip().split('\n'):
         if not line:
             continue
         if line.startswith('??'):
-            filepath = line[3:].strip()
-            untracked.append(filepath)
-    
-    if not untracked:
+            top_level_untracked.append(line[3:].strip())
+
+    if not top_level_untracked:
         print("\n✅ No untracked files to clean.")
         input("Press Enter to continue...")
         return
-    
-    print(f"\n{'=' * 80}")
-    print("UNTRACKED FILES - Select files to delete")
-    print("=" * 80)
-    print(f"\nFound {len(untracked)} untracked files:")
-    print()
-    
-    # Show files with numbers
-    for i, filepath in enumerate(untracked, 1):
-        path = Path(filepath)
-        size = ""
+
+    # Build a flat numbered list.  Directories are expanded so each contained
+    # file gets its own number.  We also record a "dir header" row so the user
+    # can still select a whole directory at once by choosing the header number.
+    #
+    # Each entry in `entries` is a dict:
+    #   kind  : 'file' | 'dir_header' | 'dir_file'
+    #   path  : str  (path relative to repo root, the actual thing to delete)
+    #   label : str  (display text)
+    #   parent: str | None  (for dir_file: the top-level dir path)
+
+    entries: List[Dict] = []
+
+    def _fmt_size(p: Path) -> str:
         try:
-            file_path = analyzer.repo_path / filepath
-            if file_path.is_file():
-                file_size = file_path.stat().st_size
-                if file_size < 1024:
-                    size = f" ({file_size}B)"
-                elif file_size < 1024 * 1024:
-                    size = f" ({file_size / 1024:.1f}KB)"
-                else:
-                    size = f" ({file_size / (1024 * 1024):.1f}MB)"
-        except:
-            pass
-        
-        print(f"  {i:2d}. {filepath}{size}")
-    
+            s = p.stat().st_size
+            if s < 1024:
+                return f"{s}B"
+            elif s < 1024 * 1024:
+                return f"{s/1024:.1f}KB"
+            else:
+                return f"{s/(1024*1024):.1f}MB"
+        except Exception:
+            return ""
+
+    for fp in top_level_untracked:
+        abs_fp = analyzer.repo_path / fp
+        if abs_fp.is_dir():
+            # Directory header — selecting this number deletes the whole dir
+            file_count, text_lines, binary_count = _dir_stats(abs_fp, analyzer.repo_path)
+            size_parts = [f"{file_count} file(s)"]
+            if binary_count:
+                size_parts.append(f"{binary_count} binary")
+            entries.append({
+                'kind': 'dir_header',
+                'path': fp,
+                'label': f"📁 {fp}  [{', '.join(size_parts)}]  ← whole directory",
+                'parent': None,
+            })
+            # Expand individual files inside
+            for sub in sorted(abs_fp.rglob('*')):
+                if sub.is_file():
+                    rel = str(sub.relative_to(analyzer.repo_path))
+                    icon = "📦" if _is_binary_file(sub) else "📄"
+                    size_str = _fmt_size(sub)
+                    entries.append({
+                        'kind': 'dir_file',
+                        'path': rel,
+                        'label': f"    {icon} {rel}  ({size_str})",
+                        'parent': fp,
+                    })
+        else:
+            size_str = _fmt_size(abs_fp)
+            icon = "📦" if _is_binary_file(abs_fp) else "📄"
+            entries.append({
+                'kind': 'file',
+                'path': fp,
+                'label': f"{icon} {fp}  ({size_str})",
+                'parent': None,
+            })
+
+    print(f"\n{'=' * 80}")
+    print("UNTRACKED FILES - Select files/dirs to delete")
+    print("=" * 80)
+    print()
+    print("  Each file has its own number.  Picking a 📁 directory number")
+    print("  deletes the entire directory.  Picking individual 📄/📦 numbers")
+    print("  inside it deletes only those files.")
+    print()
+
+    for i, entry in enumerate(entries, 1):
+        print(f"  {i:3d}. {entry['label']}")
+
     print()
     print("Options:")
-    print("  - Enter file numbers to delete (e.g., '1 3 5' or '1-3')")
-    print("  - Enter 'all' to delete all untracked files")
+    print("  - Enter numbers to delete (e.g. '3 5 6' or '1-4')")
+    print("  - Enter 'all' to delete everything listed")
     print("  - Enter 'q' to cancel")
     print()
-    
+
     try:
-        selection = input("Select files to delete: ").strip()
+        selection = input("Select to delete: ").strip()
     except KeyboardInterrupt:
         print("\n\nCancelled.")
         return
-    
+
     if selection.lower() == 'q':
         print("Cancelled.")
         return
-    
-    # Parse selection
-    files_to_delete = []
-    
+
+    # ── Parse selection into a set of entry indices ───────────────────────────
+    selected_indices: set = set()
+
     if selection.lower() == 'all':
-        files_to_delete = untracked
+        selected_indices = set(range(len(entries)))
     else:
-        # Parse numbers and ranges
         for part in selection.split():
             if '-' in part:
-                # Range like "1-3"
                 try:
-                    start, end = part.split('-')
-                    start_idx = int(start) - 1
-                    end_idx = int(end) - 1
-                    if 0 <= start_idx < len(untracked) and 0 <= end_idx < len(untracked):
-                        files_to_delete.extend(untracked[start_idx:end_idx + 1])
-                except:
-                    print(f"Invalid range: {part}")
+                    a, b = part.split('-', 1)
+                    for idx in range(int(a) - 1, int(b)):
+                        if 0 <= idx < len(entries):
+                            selected_indices.add(idx)
+                except Exception:
+                    print(f"  Invalid range: {part}")
             else:
-                # Single number
                 try:
                     idx = int(part) - 1
-                    if 0 <= idx < len(untracked):
-                        files_to_delete.append(untracked[idx])
-                except:
-                    print(f"Invalid number: {part}")
-    
-    if not files_to_delete:
+                    if 0 <= idx < len(entries):
+                        selected_indices.add(idx)
+                    else:
+                        print(f"  Number out of range: {part}")
+                except Exception:
+                    print(f"  Invalid number: {part}")
+
+    if not selected_indices:
         print("No files selected.")
         return
-    
-    # Confirm deletion
+
+    # ── Resolve what to actually delete ──────────────────────────────────────
+    # If a dir_header is selected → delete the whole directory (ignore any
+    # individual dir_file selections under it, they'd already be gone).
+    # If only some dir_files are selected → delete just those files.
+
+    whole_dirs_to_delete: set = set()   # top-level directory paths
+    files_to_delete: List[str] = []     # individual file paths
+
+    for idx in sorted(selected_indices):
+        entry = entries[idx]
+        if entry['kind'] == 'dir_header':
+            whole_dirs_to_delete.add(entry['path'])
+        elif entry['kind'] == 'dir_file':
+            parent = entry['parent']
+            if parent not in whole_dirs_to_delete:
+                files_to_delete.append(entry['path'])
+        else:  # 'file'
+            files_to_delete.append(entry['path'])
+
+    # ── Confirm ───────────────────────────────────────────────────────────────
     print(f"\n{'=' * 80}")
     print("CONFIRM DELETION")
     print("=" * 80)
-    print(f"\nFiles to delete ({len(files_to_delete)}):")
-    for filepath in files_to_delete:
-        print(f"  ❌ {filepath}")
-    
+    total = len(whole_dirs_to_delete) + len(files_to_delete)
+    print(f"\nAbout to delete ({total} item(s)):")
+    for d in sorted(whole_dirs_to_delete):
+        print(f"  ❌ {d}/  (entire directory)")
+    for f in files_to_delete:
+        print(f"  ❌ {f}")
+
     print()
     try:
-        confirm = input("⚠️  Delete these files permanently? (yes/no): ").strip().lower()
+        confirm = input("⚠️  Delete permanently? (yes/no): ").strip().lower()
     except KeyboardInterrupt:
         print("\n\nCancelled.")
         return
-    
+
     if confirm not in ('yes', 'y'):
         print("Deletion cancelled.")
         return
-    
-    # Delete files
+
+    # ── Execute deletions ─────────────────────────────────────────────────────
     deleted_count = 0
     failed = []
-    
-    for filepath in files_to_delete:
+
+    for dp in sorted(whole_dirs_to_delete):
         try:
-            file_path = analyzer.repo_path / filepath
-            if file_path.is_file():
-                file_path.unlink()
-                deleted_count += 1
-                print(f"  ✓ Deleted: {filepath}")
-            elif file_path.is_dir():
-                import shutil
-                shutil.rmtree(file_path)
-                deleted_count += 1
-                print(f"  ✓ Deleted: {filepath}")
+            shutil.rmtree(analyzer.repo_path / dp)
+            deleted_count += 1
+            print(f"  ✓ Deleted directory: {dp}/")
         except Exception as e:
-            failed.append((filepath, str(e)))
-            print(f"  ✗ Failed: {filepath} - {e}")
-    
+            failed.append((dp, str(e)))
+            print(f"  ✗ Failed: {dp}/ — {e}")
+
+    for fp in files_to_delete:
+        try:
+            file_path = analyzer.repo_path / fp
+            file_path.unlink()
+            deleted_count += 1
+            print(f"  ✓ Deleted: {fp}")
+        except Exception as e:
+            failed.append((fp, str(e)))
+            print(f"  ✗ Failed: {fp} — {e}")
+
     print()
-    print(f"✅ Deleted {deleted_count} file(s)")
-    
+    print(f"✅ Deleted {deleted_count} item(s)")
+
     if failed:
-        print(f"❌ Failed to delete {len(failed)} file(s)")
-    
+        print(f"❌ Failed to delete {len(failed)} item(s)")
+
     input("\nPress Enter to continue...")
 
 
@@ -2597,7 +3007,7 @@ def review_all_changes(analyzer: ChangeAnalyzer):
     regular_files = [f for f in all_files if 'path' in f]
 
     # Let user exclude specific files before reviewing
-    regular_files = pick_files_to_review(regular_files)
+    regular_files = pick_files_to_review(regular_files, repo_path=analyzer.repo_path)
     if not regular_files:
         print("  (all files excluded)")
         return

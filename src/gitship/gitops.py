@@ -109,6 +109,25 @@ def has_ignored_changes(repo_path: Path, patterns: Optional[List[str]] = None) -
     return False
 
 
+def _get_matched_files(repo_path: Path, patterns: List[str]) -> List[str]:
+    """Return the list of dirty files that match the given ignore patterns."""
+    result = run_git(["status", "--porcelain"], cwd=repo_path, check=False)
+    if result.returncode != 0:
+        return []
+    matched = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            filepath = parts[1].strip()
+            for pattern in patterns:
+                if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(Path(filepath).name, pattern):
+                    matched.append(filepath)
+                    break
+    return matched
+
+
 def atomic_git_operation(
     repo_path: Path,
     git_command: List[str],
@@ -178,6 +197,14 @@ def atomic_git_operation(
     if needs_stash:
         print(f"\n🔒 Stashing ignorable changes before {description}...")
         
+        # Build a richer stash message that includes the actual filenames,
+        # so the stash history is searchable and self-documenting.
+        matched_files = _get_matched_files(repo_path, ignore_patterns)
+        if matched_files:
+            file_summary = ", ".join(matched_files[:5])
+            if len(matched_files) > 5:
+                file_summary += f" (+{len(matched_files) - 5} more)"
+            stash_message = f"Auto-stash [{description}]: {file_summary}"
         # Create pathspecs for git stash push
         # This only stashes matching files, not everything
         stash_cmd = ["stash", "push", "-m", stash_message]
@@ -550,7 +577,16 @@ def stash_ignored_changes(repo_path: Path, description: str, patterns: Optional[
     print(f"\n⚠️  Ignorable file changes detected: {', '.join(patterns)}")
     print("These will be stashed.")
     
-    stash_cmd = ["stash", "push", "-m", f"Manual stash: {description}", "--"]
+    matched_files = _get_matched_files(repo_path, patterns)
+    if matched_files:
+        file_summary = ", ".join(matched_files[:5])
+        if len(matched_files) > 5:
+            file_summary += f" (+{len(matched_files) - 5} more)"
+        stash_label = f"Manual stash [{description}]: {file_summary}"
+    else:
+        stash_label = f"Manual stash: {description}"
+    
+    stash_cmd = ["stash", "push", "-m", stash_label, "--"]
     stash_cmd.extend(patterns)
     
     result = run_git(stash_cmd, cwd=repo_path, check=False)

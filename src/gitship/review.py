@@ -366,6 +366,396 @@ def display_commit_stats(commits: List[dict], commit_details: dict):
         print()
 
 
+def _get_gitignore_patterns(repo_path: Path) -> list:
+    """Return a list of patterns from .gitignore (simple globs only)."""
+    patterns = []
+    gi = repo_path / ".gitignore"
+    if gi.exists():
+        for line in gi.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(line)
+    return patterns
+
+
+def _is_ignored(rel_path: str, patterns: list) -> bool:
+    """Very simple gitignore-style check: match against fnmatch patterns."""
+    import fnmatch
+    parts = rel_path.replace("\\", "/").split("/")
+    for pat in patterns:
+        pat = pat.lstrip("/")
+        # Match against the full relative path or any path component
+        if fnmatch.fnmatch(rel_path, pat):
+            return True
+        if fnmatch.fnmatch(parts[-1], pat):
+            return True
+        # directory patterns (e.g. __pycache__/)
+        for part in parts:
+            if fnmatch.fnmatch(part, pat.rstrip("/")):
+                return True
+    return False
+
+
+def download_pypi_sdist(package_name: str, version: str, dest_dir: Path) -> Path:
+    """
+    Download the sdist for package_name==version from PyPI into dest_dir.
+    Returns the path to the extracted source directory.
+    Raises RuntimeError on failure.
+    """
+    import tarfile, zipfile, urllib.request, json as _json
+
+    ver = version.lstrip("v")
+    url = f"https://pypi.org/pypi/{package_name}/{ver}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            data = _json.loads(r.read())
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch PyPI metadata for {package_name}=={ver}: {e}")
+
+    urls = data.get("urls", [])
+    # Prefer sdist; fall back to wheel only if no sdist
+    sdist_url = next((u["url"] for u in urls if u["packagetype"] == "sdist"), None)
+    if not sdist_url:
+        sdist_url = next((u["url"] for u in urls if u["packagetype"] == "bdist_wheel"), None)
+    if not sdist_url:
+        raise RuntimeError(f"No downloadable distribution found for {package_name}=={ver}")
+
+    fname = sdist_url.rsplit("/", 1)[-1]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = dest_dir / fname
+
+    print(f"  Downloading {fname} ...", flush=True)
+    try:
+        urllib.request.urlretrieve(sdist_url, archive_path)
+    except Exception as e:
+        raise RuntimeError(f"Download failed: {e}")
+
+    # Extract
+    extract_dir = dest_dir / "extracted"
+    extract_dir.mkdir(exist_ok=True)
+    if fname.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive_path, "r:gz") as tf:
+            tf.extractall(extract_dir)
+    elif fname.endswith(".zip") or fname.endswith(".whl"):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(extract_dir)
+    else:
+        raise RuntimeError(f"Unknown archive format: {fname}")
+
+    # The sdist usually has a single top-level directory like package-version/
+    top_dirs = [d for d in extract_dir.iterdir() if d.is_dir()]
+    if len(top_dirs) == 1:
+        return top_dirs[0]
+    return extract_dir
+
+
+def diff_pypi_vs_local(
+    pypi_src: Path,
+    local_src: Path,
+    ignore_patterns: list,
+    context_lines: int = 3,
+) -> tuple:
+    """
+    Walk local_src (respecting ignore_patterns) and diff each text file
+    against the corresponding file in pypi_src.
+
+    Returns (stat_summary: str, full_diff: str, file_stats: list[dict])
+    """
+    import difflib
+
+    TEXT_EXTS = {
+        ".py", ".txt", ".md", ".rst", ".toml", ".cfg", ".ini",
+        ".yaml", ".yml", ".json", ".js", ".ts", ".html", ".css",
+        ".sh", ".bat", ".c", ".h", ".cpp", ".java", ".go", ".rs",
+    }
+
+    # Collect all relative paths from local repo
+    local_files = []
+    for p in sorted(local_src.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            rel = str(p.relative_to(local_src))
+        except ValueError:
+            continue
+        if _is_ignored(rel, ignore_patterns):
+            continue
+        # Skip binary-ish extensions
+        if p.suffix.lower() not in TEXT_EXTS:
+            continue
+        local_files.append(rel)
+
+    file_stats = []
+    diff_chunks = []
+    total_add = total_del = 0
+
+    for rel in local_files:
+        local_path = local_src / rel
+        pypi_path  = pypi_src / rel
+
+        try:
+            local_lines = local_path.read_text(errors="ignore").splitlines(keepends=True)
+        except Exception:
+            continue
+
+        if pypi_path.exists():
+            try:
+                pypi_lines = pypi_path.read_text(errors="ignore").splitlines(keepends=True)
+            except Exception:
+                pypi_lines = []
+        else:
+            pypi_lines = []  # new file
+
+        udiff = list(difflib.unified_diff(
+            pypi_lines, local_lines,
+            fromfile=f"pypi/{rel}",
+            tofile=f"local/{rel}",
+            n=context_lines,
+        ))
+
+        if not udiff:
+            continue
+
+        adds = sum(1 for l in udiff if l.startswith("+") and not l.startswith("+++"))
+        dels = sum(1 for l in udiff if l.startswith("-") and not l.startswith("---"))
+        total_add += adds
+        total_del += dels
+
+        bar_len = min(50, adds + dels)
+        bar = "+" * min(bar_len, adds) + "-" * min(bar_len - min(bar_len, adds), dels)
+        file_stats.append({"path": rel, "adds": adds, "dels": dels, "bar": bar})
+        diff_chunks.append("".join(udiff))
+
+    # Files in PyPI but absent locally (deleted files)
+    if pypi_src.exists():
+        for p in sorted(pypi_src.rglob("*")):
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(pypi_src))
+            except ValueError:
+                continue
+            if _is_ignored(rel, ignore_patterns):
+                continue
+            if p.suffix.lower() not in TEXT_EXTS:
+                continue
+            if (local_src / rel).exists():
+                continue  # already handled above
+            try:
+                pypi_lines = p.read_text(errors="ignore").splitlines(keepends=True)
+            except Exception:
+                continue
+            udiff = list(difflib.unified_diff(
+                pypi_lines, [],
+                fromfile=f"pypi/{rel}",
+                tofile=f"local/{rel} (deleted)",
+                n=context_lines,
+            ))
+            if not udiff:
+                continue
+            dels = sum(1 for l in udiff if l.startswith("-") and not l.startswith("---"))
+            total_del += dels
+            file_stats.append({"path": rel, "adds": 0, "dels": dels, "bar": "-" * min(50, dels)})
+            diff_chunks.append("".join(udiff))
+
+    # Build stat summary  (mimics git --stat output)
+    stat_lines = []
+    max_path = max((len(f["path"]) for f in file_stats), default=20)
+    for fs in file_stats:
+        stat_lines.append(f" {fs['path']:<{max_path}} | {fs['adds'] + fs['dels']:>4}  {fs['bar']}")
+    n_files = len(file_stats)
+    stat_lines.append(
+        f" {n_files} file(s) changed, {total_add} insertion(s)(+), {total_del} deletion(s)(-)"
+    )
+    stat_summary = "\n".join(stat_lines)
+    full_diff = "\n".join(diff_chunks)
+
+    return stat_summary, full_diff, file_stats
+
+
+def _get_package_src_dirs(repo_path: Path) -> list:
+    """
+    Read pyproject.toml / setup.cfg to find the source directories that would
+    be included in the built package.  Returns a list of relative path prefixes
+    (e.g. ["src/urllib3"] or ["urllib3"]).  Falls back to ["src"] then ["."].
+    """
+    import re as _re
+
+    toml = repo_path / "pyproject.toml"
+    if toml.exists():
+        text = toml.read_text(errors="ignore")
+
+        # [tool.setuptools.packages.find] where = ["src"]
+        where_m = _re.search(r'where\s*=\s*\[([^\]]+)\]', text)
+        if where_m:
+            dirs = [d.strip().strip('"\'`') for d in where_m.group(1).split(",") if d.strip()]
+            if dirs:
+                # Expand: if where=["src"], find all packages inside src/
+                result = []
+                for d in dirs:
+                    src_root = repo_path / d
+                    if src_root.is_dir():
+                        # Each immediate subdirectory is a package
+                        for sub in sorted(src_root.iterdir()):
+                            if sub.is_dir() and not sub.name.startswith("."):
+                                result.append(f"{d}/{sub.name}")
+                    if not result:
+                        result.append(d)
+                return result
+
+        # packages = [{include = "urllib3", from = "src"}]  (flit-style)
+        include_m = _re.search(r'include\s*=\s*"([^"]+)"', text)
+        if include_m:
+            return [include_m.group(1)]
+
+    # setup.cfg: package_dir = src
+    cfg = repo_path / "setup.cfg"
+    if cfg.exists():
+        text = cfg.read_text(errors="ignore")
+        m = _re.search(r'package_dir\s*=\s*.*?src', text)
+        if m:
+            return ["src"]
+
+    # Last resort
+    for candidate in ["src", "."]:
+        if (repo_path / candidate).is_dir():
+            return [candidate]
+    return ["."]
+
+
+def main_with_args_pypi(
+    repo_path: Path,
+    package_name: str,
+    pypi_version: str,
+    to_ref: str = "HEAD",
+    src_only: bool = False,
+):
+    """
+    Review diff between published PyPI source and current local repo.
+    Downloads the sdist, extracts it, diffs against local working tree.
+
+    src_only: if True, restrict comparison to package source directories only
+              (reads pyproject.toml build config) — excludes tests, docs, CI, etc.
+    """
+    import tempfile
+
+    print(f"\n{'=' * 80}")
+    print(f"PYPI SOURCE DIFF: {package_name}")
+    print("=" * 80)
+    print(f"  Published : {package_name}=={pypi_version.lstrip('v')}")
+    print(f"  Local     : {repo_path} ({to_ref})")
+    if src_only:
+        print(f"  Scope     : package source files only (excluding tests/docs/CI)")
+    print("=" * 80)
+
+    ignore_patterns = _get_gitignore_patterns(repo_path)
+    # Always skip common noise
+    ignore_patterns += [
+        ".git", ".gitignore", "__pycache__", "*.pyc", "*.pyo",
+        ".eggs", "*.egg-info", "dist", "build", ".tox", ".mypy_cache",
+        "htmlcov", ".coverage", "*.mo",
+    ]
+
+    # If src_only, further restrict to package source dirs
+    src_dirs = None
+    if src_only:
+        src_dirs = _get_package_src_dirs(repo_path)
+        print(f"  Source dirs: {src_dirs}")
+        print()
+
+    with tempfile.TemporaryDirectory(prefix="gitship_pypi_") as tmp:
+        tmp_path = Path(tmp)
+        try:
+            pypi_src = download_pypi_sdist(package_name, pypi_version, tmp_path)
+        except RuntimeError as e:
+            print(f"\n⚠️  Could not download PyPI source: {e}")
+            print("   Skipping source diff — continuing with release.")
+            return
+
+        print("  Comparing files...", flush=True)
+
+        if src_only and src_dirs:
+            # Diff each src_dir separately, using the corresponding subtree in the sdist
+            all_file_stats = []
+            all_diff_chunks = []
+            total_add = total_del = 0
+
+            for src_dir in src_dirs:
+                local_subtree = repo_path / src_dir
+                if not local_subtree.exists():
+                    continue
+                # Find matching subtree in sdist (may be at src_dir or just the package name)
+                pypi_subtree = pypi_src / src_dir
+                if not pypi_subtree.exists():
+                    # Try just the last component (e.g. src/urllib3 -> urllib3)
+                    pypi_subtree = pypi_src / Path(src_dir).name
+                if not pypi_subtree.exists():
+                    pypi_subtree = pypi_src  # fall back to sdist root
+
+                stat_s, diff_s, fstats = diff_pypi_vs_local(
+                    pypi_subtree, local_subtree, ignore_patterns
+                )
+                # Re-prefix paths with src_dir for display
+                for fs in fstats:
+                    fs["path"] = f"{src_dir}/{fs['path']}"
+                all_file_stats.extend(fstats)
+                if diff_s:
+                    all_diff_chunks.append(diff_s)
+
+            # Re-compute summary from combined stats
+            total_add = sum(f["adds"] for f in all_file_stats)
+            total_del = sum(f["dels"] for f in all_file_stats)
+            max_path = max((len(f["path"]) for f in all_file_stats), default=20)
+            stat_lines = [
+                f" {f['path']:<{max_path}} | {f['adds'] + f['dels']:>4}  {f['bar']}"
+                for f in all_file_stats
+            ]
+            n = len(all_file_stats)
+            stat_lines.append(f" {n} file(s) changed, {total_add} insertion(s)(+), {total_del} deletion(s)(-)")
+            stat_summary = "\n".join(stat_lines)
+            full_diff = "\n".join(all_diff_chunks)
+            file_stats = all_file_stats
+        else:
+            stat_summary, full_diff, file_stats = diff_pypi_vs_local(
+                pypi_src, repo_path, ignore_patterns
+            )
+
+    print("\n" + "=" * 80)
+    label = "package source only" if src_only else "full repo"
+    print(f"DIFF STATISTICS  (PyPI published → local HEAD — {label})")
+    print("=" * 80)
+    if file_stats:
+        print(stat_summary)
+    else:
+        print("  No text file differences detected.")
+    print()
+
+    if not file_stats:
+        return
+
+    print("\nOptions:")
+    print("  1. Show full diff")
+    print("  0. Continue")
+    try:
+        choice = input("Choice [0]: ").strip() or "0"
+    except (KeyboardInterrupt, EOFError):
+        return
+
+    if choice == "1" and full_diff:
+        print("\n" + "=" * 80)
+        print(f"FULL DIFF  (PyPI published → local HEAD — {label})")
+        print("=" * 80)
+        for line in full_diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                print(f"\033[32m{line}\033[0m")
+            elif line.startswith("-") and not line.startswith("---"):
+                print(f"\033[31m{line}\033[0m")
+            elif line.startswith("@@"):
+                print(f"\033[36m{line}\033[0m")
+            else:
+                print(line)
+
+
 def main_with_args(
     repo_path: Path,
     from_ref: Optional[str] = None,

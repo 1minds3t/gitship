@@ -192,16 +192,26 @@ def switch_branch(repo_path: Path, branch_name: str) -> bool:
             choice = safe_input("\nChoice (1-4): ").strip()
             
             if choice == '1':
-                # Stash and switch
-                print("\n📦 Stashing changes...")
-                stash_result = run_git(["stash", "push", "-m", f"Auto-stash before switching to {branch_name}"], repo_path)
+                # Show exactly what will be stashed before doing it
+                dirty = run_git(["status", "--porcelain"], repo_path)
+                dirty_files = [l[3:].strip() for l in dirty.stdout.strip().splitlines() if l.strip()]
+                print(f"\n📦 Stashing {len(dirty_files)} file(s):")
+                for f in dirty_files:
+                    print(f"   • {f}")
+                stash_msg = "Auto-stash before switching to " + branch_name + ": " + ", ".join(dirty_files)
+                stash_result = run_git(["stash", "push", "-m", stash_msg], repo_path)
                 if stash_result.returncode == 0:
-                    print(f"{Colors.GREEN}✓ Changes stashed{Colors.RESET}")
+                    print(f"{Colors.GREEN}✓ Stashed — restore with: git stash apply stash@{{0}}{Colors.RESET}")
                     # Try switch again
                     switch_result = run_git(["checkout", branch_name], repo_path)
                     if switch_result.returncode == 0:
                         print(f"{Colors.GREEN}✓ Switched to branch '{branch_name}'{Colors.RESET}")
-                        print(f"\n💡 To restore your stashed changes later, run: git stash pop")
+                        restore_now = safe_input(f"\n{Colors.CYAN}Restore stashed changes here on '{branch_name}'? (y/n):{Colors.RESET} ").strip().lower()
+                        if restore_now == 'y':
+                            restore_latest_stash(repo_path)
+                            print(f"{Colors.GREEN}✓ Stash restored on '{branch_name}'{Colors.RESET}")
+                        else:
+                            print(f"{Colors.DIM}   Stash kept — restore later with: git stash apply stash@{{0}}{Colors.RESET}")
                         return True
                     else:
                         print(f"{Colors.RED}✗ Failed to switch: {switch_result.stderr.strip()}{Colors.RESET}")
@@ -508,6 +518,192 @@ def change_default_branch(repo_path: Path, new_default: str) -> bool:
     print(f"\n{Colors.GREEN}✓ Local configuration updated!{Colors.RESET}")
     
     return True
+
+def get_branch_upstream_status(repo_path: Path, branch: str) -> dict:
+    """
+    Check the upstream tracking status of a branch.
+    Returns a dict with keys:
+      - 'upstream': str or None  (e.g. 'origin/main', 'lts/py38')
+      - 'upstream_gone': bool    (tracked remote no longer exists)
+      - 'remote': str or None    (just the remote name part)
+      - 'remote_branch': str or None  (just the branch name part)
+    """
+    result = run_git(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}"],
+        repo_path
+    )
+    if result.returncode != 0:
+        return {'upstream': None, 'upstream_gone': False, 'remote': None, 'remote_branch': None}
+
+    upstream = result.stdout.strip()  # e.g. "origin/main" or "lts/py38"
+    
+    # Check if the upstream actually exists
+    exists = run_git(["rev-parse", "--verify", upstream], repo_path)
+    if exists.returncode == 0:
+        parts = upstream.split('/', 1)
+        return {
+            'upstream': upstream,
+            'upstream_gone': False,
+            'remote': parts[0] if len(parts) == 2 else None,
+            'remote_branch': parts[1] if len(parts) == 2 else None,
+        }
+    
+    # Upstream ref is set but doesn't resolve — check if it's flagged as gone
+    # by git status --short --branch
+    status_res = run_git(["status", "--short", "--branch"], repo_path)
+    gone = '[gone]' in status_res.stdout
+    parts = upstream.split('/', 1)
+    return {
+        'upstream': upstream,
+        'upstream_gone': gone or True,  # if rev-parse failed it's effectively gone
+        'remote': parts[0] if len(parts) == 2 else None,
+        'remote_branch': parts[1] if len(parts) == 2 else None,
+    }
+
+
+def get_all_branches_upstream_status(repo_path: Path, local_branches: list) -> dict:
+    """Return upstream status for all local branches. {branch: status_dict}"""
+    return {b: get_branch_upstream_status(repo_path, b) for b in local_branches}
+
+
+def fix_upstream_tracking(repo_path: Path, branch: str, upstream_status: dict):
+    """
+    Interactive fix for a branch whose upstream is gone or misconfigured.
+    Options:
+      1. Point to a different remote/branch
+      2. Unset upstream (clean local-only branch)
+      3. Push to a remote to create a new upstream
+      4. Cancel
+    """
+    print(f"\n{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+    print(f"{Colors.BOLD}FIX UPSTREAM TRACKING{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+    
+    old_upstream = upstream_status.get('upstream', '(none)')
+    print(f"\n  Branch  : {Colors.CYAN}{branch}{Colors.RESET}")
+    if upstream_status['upstream_gone']:
+        print(f"  Problem : {Colors.RED}Upstream '{old_upstream}' no longer exists (remote deleted or renamed){Colors.RESET}")
+    else:
+        print(f"  Upstream: {Colors.YELLOW}{old_upstream}{Colors.RESET}")
+    
+    # Get available remotes
+    remotes_res = run_git(["remote"], repo_path)
+    remotes = [r.strip() for r in remotes_res.stdout.strip().splitlines() if r.strip()]
+    
+    print(f"\n  Available remotes: {Colors.DIM}{', '.join(remotes) if remotes else '(none)'}{Colors.RESET}")
+    print()
+    print(f"  {Colors.BOLD}What would you like to do?{Colors.RESET}")
+    print(f"  1. Set upstream to a different remote branch")
+    print(f"  2. Unset upstream  (make branch local-only, no tracking)")
+    print(f"  3. Push branch to a remote  (creates new upstream)")
+    print(f"  4. Cancel")
+    print()
+    
+    choice = safe_input(f"{Colors.CYAN}Choose (1-4):{Colors.RESET} ").strip()
+    
+    if choice == '1':
+        # Let user pick a remote and branch name
+        if not remotes:
+            print(f"{Colors.RED}No remotes configured.{Colors.RESET}")
+            return
+        
+        print(f"\n{Colors.BOLD}Available remotes:{Colors.RESET}")
+        for i, r in enumerate(remotes, 1):
+            print(f"  {i}. {r}")
+        
+        remote_sel = safe_input(f"\n{Colors.CYAN}Select remote (number or name, default={remotes[0]}):{Colors.RESET} ").strip()
+        if remote_sel.isdigit():
+            idx = int(remote_sel) - 1
+            remote = remotes[idx] if 0 <= idx < len(remotes) else remotes[0]
+        elif remote_sel:
+            remote = remote_sel
+        else:
+            remote = remotes[0]
+        
+        # Show what branches exist on that remote
+        print(f"\n{Colors.DIM}Fetching branch list from {remote}...{Colors.RESET}")
+        ls_res = run_git(["ls-remote", "--heads", remote], repo_path)
+        remote_branches = []
+        if ls_res.returncode == 0:
+            for line in ls_res.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].startswith('refs/heads/'):
+                    remote_branches.append(parts[1].replace('refs/heads/', ''))
+        
+        if remote_branches:
+            print(f"\n{Colors.BOLD}Branches on {remote}:{Colors.RESET}")
+            for i, rb in enumerate(remote_branches, 1):
+                same = f" {Colors.DIM}(same name){Colors.RESET}" if rb == branch else ""
+                print(f"  {i}. {rb}{same}")
+            
+            rb_sel = safe_input(f"\n{Colors.CYAN}Select branch (number/name, default={branch}):{Colors.RESET} ").strip()
+            if rb_sel.isdigit():
+                idx = int(rb_sel) - 1
+                remote_branch = remote_branches[idx] if 0 <= idx < len(remote_branches) else branch
+            elif rb_sel:
+                remote_branch = rb_sel
+            else:
+                remote_branch = branch
+        else:
+            remote_branch = safe_input(f"{Colors.CYAN}Remote branch name (default={branch}):{Colors.RESET} ").strip() or branch
+        
+        new_upstream = f"{remote}/{remote_branch}"
+        result = run_git(["branch", f"--set-upstream-to={new_upstream}", branch], repo_path)
+        if result.returncode == 0:
+            print(f"\n{Colors.GREEN}✓ Upstream for '{branch}' set to '{new_upstream}'  {Colors.RESET}")
+            # Fetch so the ref actually exists locally
+            print(f"{Colors.DIM}  Fetching {remote}...{Colors.RESET}")
+            run_git(["fetch", remote], repo_path)
+        else:
+            print(f"\n{Colors.RED}✗ Failed: {result.stderr.strip()}{Colors.RESET}")
+            # Maybe the remote ref doesn't exist yet — offer to just set it anyway
+            force = safe_input(f"{Colors.YELLOW}Set tracking anyway even if remote branch doesn't exist yet? (y/n):{Colors.RESET} ").strip().lower()
+            if force == 'y':
+                # Manually write the config
+                run_git(["config", f"branch.{branch}.remote", remote], repo_path)
+                run_git(["config", f"branch.{branch}.merge", f"refs/heads/{remote_branch}"], repo_path)
+                print(f"{Colors.GREEN}✓ Tracking config written for '{branch}' → {remote}/{remote_branch}{Colors.RESET}")
+    
+    elif choice == '2':
+        result = run_git(["branch", "--unset-upstream", branch], repo_path)
+        if result.returncode == 0:
+            print(f"\n{Colors.GREEN}✓ Upstream unset for '{branch}'. Branch is now local-only.{Colors.RESET}")
+        else:
+            print(f"\n{Colors.RED}✗ Failed: {result.stderr.strip()}{Colors.RESET}")
+    
+    elif choice == '3':
+        if not remotes:
+            print(f"{Colors.RED}No remotes configured.{Colors.RESET}")
+            return
+        
+        print(f"\n{Colors.BOLD}Available remotes:{Colors.RESET}")
+        for i, r in enumerate(remotes, 1):
+            print(f"  {i}. {r}")
+        
+        remote_sel = safe_input(f"\n{Colors.CYAN}Push to remote (default=origin):{Colors.RESET} ").strip()
+        if remote_sel.isdigit():
+            idx = int(remote_sel) - 1
+            remote = remotes[idx] if 0 <= idx < len(remotes) else 'origin'
+        elif remote_sel:
+            remote = remote_sel
+        else:
+            remote = 'origin' if 'origin' in remotes else remotes[0]
+        
+        remote_branch = safe_input(f"{Colors.CYAN}Remote branch name (default={branch}):{Colors.RESET} ").strip() or branch
+        
+        print(f"\n{Colors.CYAN}Pushing '{branch}' to {remote}/{remote_branch} with upstream tracking...{Colors.RESET}")
+        result = atomic_git_operation(
+            repo_path=repo_path,
+            git_command=["push", "-u", remote, f"{branch}:{remote_branch}"],
+            description=f"push {branch} to {remote}/{remote_branch} with -u tracking"
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ Pushed and upstream set to '{remote}/{remote_branch}'  {Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Push failed: {result.stderr.strip()}{Colors.RESET}")
+    
+    else:
+        print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
 
 
 def ensure_clean_git_state(repo_path: Path) -> bool:
@@ -1056,7 +1252,13 @@ def merge_branches_interactive(repo_path: Path, source: str, target: str):
         return
 
     # ── Stash background noise ────────────────────────────────────────────────
+    # Show exactly what will be stashed so nothing is ever silently lost
+    _pre_stash_status = run_git(["status", "--porcelain"], repo_path)
+    _dirty = [l[3:].strip() for l in _pre_stash_status.stdout.strip().splitlines() if l.strip()] if _pre_stash_status.returncode == 0 else []
     stashed = stash_ignored_changes(repo_path, f"Before merge {source} into {target}")
+    if stashed and _dirty:
+        print(f"{Colors.DIM}   Stashed {len(_dirty)} file(s): {', '.join(_dirty)}{Colors.RESET}")
+        print(f"{Colors.DIM}   Restore with: git stash apply stash@{{0}}{Colors.RESET}")
 
     # ── Switch to target ──────────────────────────────────────────────────────
     print(f"\n{Colors.DIM}Switching to '{target}'...{Colors.RESET}")
@@ -1229,45 +1431,77 @@ def merge_branches_interactive(repo_path: Path, source: str, target: str):
     if do_push == 'y':
         smart_push_branch(repo_path, target)
 
+    # ── Switch back to source branch (don't strand user on target) ───────────
+    current = get_current_branch(repo_path)
+    if current == target:
+        go_back = safe_input(f"\n{Colors.CYAN}Switch back to '{source}'? (y/n):{Colors.RESET} ").strip().lower()
+        if go_back == 'y':
+            run_git(["checkout", source], repo_path)
+            print(f"{Colors.GREEN}✓ Back on '{source}'{Colors.RESET}")
 
-def export_comparison(repo_path: Path, branch1: str, branch2: str, commits_1: List[str], commits_2: List[str]):
-    """Export comparison to file."""
+
+def export_comparison(repo_path: Path, source: str, target: str, commits_1: List[str], commits_2: List[str]):
+    """Export full comparison report: commit subjects+bodies, file stats, full diff."""
     try:
         from gitship.config import load_config
         config = load_config()
-        # Default to a generic export location if config fails
         export_dir = Path(config.get('export_path', Path.home() / 'gitship_exports'))
     except ImportError:
         export_dir = Path.home() / 'gitship_exports'
-    
+
     export_dir.mkdir(parents=True, exist_ok=True)
-    
-    filename = f"compare_{branch1}_vs_{branch2}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    filename = f"compare_{source}_vs_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     filepath = export_dir / filename
-    
+    W = 72
+
     with open(filepath, 'w', encoding='utf-8') as f:
-        f.write("="*60 + "\n")
-        f.write(f"BRANCH COMPARISON: {branch1} vs {branch2}\n")
+        f.write("=" * W + "\n")
+        f.write(f"BRANCH COMPARISON: {source} vs {target}\n")
         f.write(f"Repository: {repo_path}\n")
-        f.write(f"Generated: {datetime.now()}\n")
-        f.write("="*60 + "\n\n")
-        
-        f.write(f"Commits ONLY in {branch1} ({len(commits_1)}):\n")
-        f.write("-" * 60 + "\n")
-        for line in commits_1:
-            f.write(f"{line}\n")
-        if not commits_1:
+        f.write(f"Generated:  {datetime.now()}\n")
+        f.write("=" * W + "\n\n")
+
+        # ── Incoming commits — full subject + body ────────────────────────────
+        f.write(f"COMMITS ONLY IN {source} ({len(commits_1)} total):\n")
+        f.write("-" * W + "\n")
+        if commits_1:
+            log_res = run_git(
+                ["log", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n%b%n",
+                 "--date=short", f"{target}..{source}"],
+                repo_path
+            )
+            f.write(log_res.stdout if log_res.stdout.strip() else "(no log output)\n")
+        else:
+            f.write("(None — already merged or source is behind target)\n")
+        f.write("\n")
+
+        # ── Outgoing commits (target ahead of source) ─────────────────────────
+        f.write(f"COMMITS ONLY IN {target} ({len(commits_2)} total):\n")
+        f.write("-" * W + "\n")
+        if commits_2:
+            log_res2 = run_git(
+                ["log", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n%b%n",
+                 "--date=short", f"{source}..{target}"],
+                repo_path
+            )
+            f.write(log_res2.stdout if log_res2.stdout.strip() else "(no log output)\n")
+        else:
             f.write("(None)\n")
         f.write("\n")
-        
-        f.write(f"Commits ONLY in {branch2} ({len(commits_2)}):\n")
-        f.write("-" * 60 + "\n")
-        for line in commits_2:
-            f.write(f"{line}\n")
-        if not commits_2:
-            f.write("(None)\n")
-        f.write("\n")
-    
+
+        # ── File stat summary ─────────────────────────────────────────────────
+        f.write("FILE CHANGES (stat):\n")
+        f.write("-" * W + "\n")
+        stat_res = run_git(["diff", "--stat", f"{target}...{source}"], repo_path)
+        f.write(stat_res.stdout.strip() if stat_res.stdout.strip() else "(no changes)")
+        f.write("\n\n")
+
+        # ── Full unified diff ─────────────────────────────────────────────────
+        f.write("FULL DIFF:\n")
+        f.write("-" * W + "\n")
+        diff_res = run_git(["diff", "--no-color", f"{target}...{source}"], repo_path)
+        f.write(diff_res.stdout if diff_res.stdout.strip() else "(no content changes)\n")
+
     print(f"{Colors.GREEN}✅ Exported to: {filepath}{Colors.RESET}")
 
 
@@ -1590,12 +1824,13 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     print(f"\n{Colors.BOLD}ACTIONS:{Colors.RESET}")
     print(f"  1. Merge {Colors.CYAN}{source}{Colors.RESET} ➜ INTO ➜ {Colors.CYAN}{target}{Colors.RESET}")
     print(f"  2. Cherry-pick commits from {Colors.CYAN}{source}{Colors.RESET} ➜ INTO ➜ {Colors.CYAN}{target}{Colors.RESET}")
-    print(f"  3. View full diff (content changes)")
-    print(f"  4. Swap Source/Target (Review other direction)")
-    print(f"  5. Export this comparison")
+    print(f"  3. View commits with full descriptions  ({len(incoming_list)} commits, paged)")
+    print(f"  4. Browse diff by file  (preview each file, max 50 lines)")
+    print(f"  5. Swap Source/Target (Review other direction)")
+    print(f"  6. Export full report  (commit bodies + full diff → .txt)")
     print(f"  0. Back")
     
-    choice = safe_input(f"\n{Colors.BLUE}Choice (0-5):{Colors.RESET} ").strip()
+    choice = safe_input(f"\n{Colors.BLUE}Choice (0-6):{Colors.RESET} ").strip()
     
     if choice == "1":
         merge_branches_interactive(repo_path, source=source, target=target)
@@ -1678,7 +1913,12 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
         print(f"\n{Colors.BOLD}🍒 Cherry-picking {len(incoming_list)} commits from {source} INTO {target}...{Colors.RESET}")
         
         # 0. Atomic Stash
+        _pre_stash_status = run_git(["status", "--porcelain"], repo_path)
+        _dirty = [l[3:].strip() for l in _pre_stash_status.stdout.strip().splitlines() if l.strip()] if _pre_stash_status.returncode == 0 else []
         stashed = stash_ignored_changes(repo_path, f"Before cherry-pick {source} into {target}")
+        if stashed and _dirty:
+            print(f"{Colors.DIM}   Stashed {len(_dirty)} file(s): {', '.join(_dirty)}{Colors.RESET}")
+            print(f"{Colors.DIM}   Restore with: git stash apply stash@{{0}}{Colors.RESET}")
 
         # Safety check: are we on target?
         current = get_current_branch(repo_path)
@@ -1936,25 +2176,179 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
                     print(f"  git cherry-pick --abort")
     
     elif choice == "3":
-        print(f"\n{Colors.BOLD}📄 FULL DIFF ({source} vs {target}):{Colors.RESET}")
-        print("="*60)
-        # Use 3-dot diff to see what source adds to target, force color for readability
-        diff_res = run_git(["diff", "--color=always", f"{target}...{source}"], repo_path)
-        if diff_res.stdout.strip():
-            print(diff_res.stdout)
-        else:
-            print("(No content changes)")
-        print("="*60)
-        safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
-        # Re-show the menu
+        _show_commits_with_bodies(repo_path, source, target)
         compare_branches_simple(repo_path, source, target)
 
     elif choice == "4":
-        # Recursively call with swapped args
-        compare_branches_simple(repo_path, source=target, target=source)
+        _browse_diff_by_file(repo_path, source, target)
+        compare_branches_simple(repo_path, source, target)
+
     elif choice == "5":
-        # We need to reconstruct the list for export
-        export_comparison(repo_path, source, target, incoming_list, [])
+        compare_branches_simple(repo_path, source=target, target=source)
+
+    elif choice == "6":
+        export_comparison(repo_path, source, target, incoming_list, missing_list)
+        safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+        compare_branches_simple(repo_path, source, target)
+
+
+def _show_commits_with_bodies(repo_path: Path, source: str, target: str):
+    """Show all incoming commits with subject + body, paged 15 at a time."""
+    # Use --format with a unique record-start sentinel so we can split reliably.
+    # \x1e is ASCII Record Separator — won't appear in commit messages.
+    # Each record: SENTINEL hash\nsubject\nauthor\ndate\n\nbody
+    SENTINEL = "\x1e"
+    log_res = run_git(
+        ["log",
+         f"--format={SENTINEL}%H%n%s%n%an%n%ad%n%n%b",
+         "--date=short",
+         f"{target}..{source}"],
+        repo_path
+    )
+    raw = log_res.stdout
+
+    if not raw.strip():
+        print(f"{Colors.YELLOW}(No commits){Colors.RESET}")
+        safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        return
+
+    entries = []
+    for record in raw.split(SENTINEL):
+        record = record.strip()
+        if not record:
+            continue
+        lines = record.splitlines()
+        if len(lines) < 1:
+            continue
+        sha    = lines[0].strip()[:8] if lines else "?"
+        subj   = lines[1].strip()     if len(lines) > 1 else ""
+        author = lines[2].strip()     if len(lines) > 2 else ""
+        date   = lines[3].strip()     if len(lines) > 3 else ""
+        # body starts after the blank line (index 4), strip leading/trailing blanks
+        body_lines = lines[5:] if len(lines) > 5 else []
+        # strip trailing empty lines from body
+        while body_lines and not body_lines[-1].strip():
+            body_lines.pop()
+        body = "\n".join(body_lines)
+        if sha:
+            entries.append((sha, subj, body, author, date))
+
+    if not entries:
+        fallback = run_git(["log", "--oneline", f"{target}..{source}"], repo_path)
+        lines = [l for l in fallback.stdout.strip().splitlines() if l]
+        print(f"\n{Colors.BOLD}All {len(lines)} commits:{Colors.RESET}")
+        for l in lines:
+            print(f"  {Colors.GREEN}+{Colors.RESET} {l}")
+        safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        return
+
+    PAGE = 15
+    total = len(entries)
+    page  = 0
+
+    while True:
+        start = page * PAGE
+        end   = min(start + PAGE, total)
+        print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}COMMITS {start+1}–{end} of {total}  ({source} not in {target}){Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+
+        for sha, subj, body, author, date in entries[start:end]:
+            print(f"\n  {Colors.GREEN}{sha}{Colors.RESET}  {Colors.BOLD}{subj}{Colors.RESET}")
+            if author or date:
+                print(f"  {Colors.DIM}{author}  {date}{Colors.RESET}")
+            if body:
+                blines = body.splitlines()
+                for bline in blines[:6]:
+                    print(f"  {Colors.DIM}│ {bline}{Colors.RESET}")
+                if len(blines) > 6:
+                    print(f"  {Colors.DIM}│ ... ({len(blines)-6} more lines){Colors.RESET}")
+
+        nav = []
+        if end < total:
+            nav.append("n=next")
+        if page > 0:
+            nav.append("p=prev")
+        nav.append("Enter=back")
+        resp = safe_input(
+            f"\n  Page {page+1}/{(total+PAGE-1)//PAGE}  [{' | '.join(nav)}]: "
+        ).strip().lower()
+        if resp == 'n' and end < total:
+            page += 1
+        elif resp == 'p' and page > 0:
+            page -= 1
+        else:
+            break
+
+
+def _browse_diff_by_file(repo_path: Path, source: str, target: str):
+    """
+    List all changed files; user picks one to see a 50-line preview.
+    Loops until user presses 0/Enter to go back.
+    """
+    name_res  = run_git(["diff", "--name-only",  f"{target}...{source}"], repo_path)
+    stat_res  = run_git(["diff", "--stat",        f"{target}...{source}"], repo_path)
+    changed_files = [f for f in name_res.stdout.strip().splitlines() if f]
+
+    if not changed_files:
+        print(f"{Colors.YELLOW}(No file changes){Colors.RESET}")
+        safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        return
+
+    stat_lines = stat_res.stdout.rstrip().splitlines()
+
+    while True:
+        print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}CHANGED FILES — {len(changed_files)} files{Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+
+        # Print stat lines with index numbers (skip last summary line)
+        for i, sline in enumerate(stat_lines[:-1], 1):
+            print(f"  {i:>3}.{sline}")
+        if stat_lines:
+            print(f"\n  {Colors.DIM}{stat_lines[-1].strip()}{Colors.RESET}")
+
+        print(f"\n  0. Back")
+        sel = safe_input(f"\n{Colors.CYAN}File number to preview (0=back): {Colors.RESET}").strip()
+
+        if not sel or sel == '0':
+            break
+        try:
+            idx = int(sel) - 1
+        except ValueError:
+            print(f"{Colors.RED}Invalid.{Colors.RESET}")
+            continue
+        if not (0 <= idx < len(changed_files)):
+            print(f"{Colors.RED}Invalid.{Colors.RESET}")
+            continue
+
+        chosen = changed_files[idx]
+        file_diff = run_git(
+            ["diff", "--no-color", f"{target}...{source}", "--", chosen], repo_path
+        )
+        diff_lines = file_diff.stdout.splitlines()
+
+        print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}DIFF: {chosen}{Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
+
+        LIMIT = 50
+        for line in diff_lines[:LIMIT]:
+            if line.startswith('+') and not line.startswith('+++'):
+                print(f"{Colors.GREEN}{line}{Colors.RESET}")
+            elif line.startswith('-') and not line.startswith('---'):
+                print(f"{Colors.RED}{line}{Colors.RESET}")
+            elif line.startswith('@@'):
+                print(f"{Colors.CYAN}{line}{Colors.RESET}")
+            else:
+                print(f"{Colors.DIM}{line}{Colors.RESET}")
+
+        if len(diff_lines) > LIMIT:
+            remaining = len(diff_lines) - LIMIT
+            print(f"\n{Colors.YELLOW}  ... {remaining} more lines not shown. Use Export (option 6) for the full diff.{Colors.RESET}")
+
+        safe_input(f"\n{Colors.DIM}Press Enter to return to file list...{Colors.RESET}")
+
 
 def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
     """
@@ -2353,11 +2747,25 @@ def _show_branch_menu_inner(repo_path: Path):
         print(f"Current Branch: {Colors.BRIGHT_GREEN}{current or 'detached HEAD'}{Colors.RESET}")
         print(f"Default Branch: {Colors.BRIGHT_CYAN}{default or 'unknown'}{Colors.RESET}")
         
+        # Check upstream status for all local branches
+        upstream_statuses = get_all_branches_upstream_status(repo_path, branches['local'])
+        gone_branches = [b for b, s in upstream_statuses.items() if s['upstream_gone']]
+
         print(f"\n{Colors.BOLD}Local Branches:{Colors.RESET}")
         for branch in branches['local']:
             marker = f"{Colors.BRIGHT_GREEN}● {Colors.RESET}" if branch == current else "  "
             default_marker = f" {Colors.BRIGHT_CYAN}(default){Colors.RESET}" if branch == default else ""
-            print(f"{marker}{branch}{default_marker}")
+            us = upstream_statuses.get(branch, {})
+            if us.get('upstream_gone'):
+                tracking = f" {Colors.RED}[upstream gone: {us['upstream']}]{Colors.RESET}"
+            elif us.get('upstream'):
+                tracking = f" {Colors.DIM}→ {us['upstream']}{Colors.RESET}"
+            else:
+                tracking = f" {Colors.DIM}(local only){Colors.RESET}"
+            print(f"{marker}{branch}{default_marker}{tracking}")
+
+        if gone_branches:
+            print(f"\n{Colors.RED}⚠  {len(gone_branches)} branch(es) have a missing upstream — use option A to fix{Colors.RESET}")
         
         print(f"\n{Colors.BOLD}Available Operations:{Colors.RESET}")
         print("  1. Create new branch")
@@ -2369,10 +2777,12 @@ def _show_branch_menu_inner(repo_path: Path):
         print("  7. Manage remote branches")
         print("  8. Compare & Merge branches (Simple)")
         print("  9. Cleanup redundant branches")
+        print(f"  {Colors.YELLOW}A. Fix upstream tracking{Colors.RESET}  (set/unset/repair branch → remote tracking)")
+        print(f"  {Colors.YELLOW}S. Stash manager{Colors.RESET}  (list/apply/restore stashed changes)")
         print("  0. Exit")
         
         try:
-            choice = safe_input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9):{Colors.RESET} ").strip()
+            choice = safe_input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9, A):{Colors.RESET} ").strip().upper()
         except (KeyboardInterrupt, EOFError, UserCancelled):
             print(f"\n\n{Colors.YELLOW}Cancelled{Colors.RESET}")
             break
@@ -2850,6 +3260,48 @@ def _show_branch_menu_inner(repo_path: Path):
                     else:
                         print(f"{Colors.RED}✗ Failed: {result.stderr.strip()}{Colors.RESET}")
         
+        elif choice == "A":
+            # Fix upstream tracking
+            print(f"\n{Colors.BOLD}Select branch to fix:{Colors.RESET}")
+            # Show all branches with their upstream status
+            for i, b in enumerate(branches['local'], 1):
+                us = upstream_statuses.get(b, {})
+                if us.get('upstream_gone'):
+                    tag = f" {Colors.RED}[upstream GONE: {us['upstream']}]{Colors.RESET}"
+                elif us.get('upstream'):
+                    tag = f" {Colors.DIM}→ {us['upstream']}{Colors.RESET}"
+                else:
+                    tag = f" {Colors.DIM}(local only — no upstream){Colors.RESET}"
+                marker = f"{Colors.BRIGHT_GREEN}(current){Colors.RESET} " if b == current else ""
+                print(f"  {i}. {marker}{b}{tag}")
+            
+            sel = safe_input(f"\n{Colors.CYAN}Enter number or name (Enter for current branch):{Colors.RESET} ").strip()
+            
+            if not sel:
+                branch_to_fix = current
+            elif sel.isdigit():
+                idx = int(sel) - 1
+                branch_to_fix = branches['local'][idx] if 0 <= idx < len(branches['local']) else None
+            else:
+                branch_to_fix = sel
+            
+            if branch_to_fix and branch_to_fix in branches['local']:
+                fix_upstream_tracking(repo_path, branch_to_fix, upstream_statuses.get(branch_to_fix, {'upstream': None, 'upstream_gone': False}))
+            else:
+                print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+
+        elif choice == "S":
+            try:
+                from gitship.stash import run_stash_menu
+            except ImportError:
+                # fallback: same dir
+                import importlib.util, os
+                _spec = importlib.util.spec_from_file_location("stash", os.path.join(os.path.dirname(__file__), "stash.py"))
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                run_stash_menu = _mod.run_stash_menu
+            run_stash_menu(repo_path)
+
         elif choice == "8":
             # Compare branches - Simple Version
             while True:
