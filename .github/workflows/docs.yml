@@ -1,0 +1,40 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Build and deploy MkDocs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # needed for git-revision-date plugin
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install MkDocs + theme
+        run: |
+          python -m pip install --upgrade pip
+          # Install from requirements-docs.txt if present, otherwise bare minimum
+          if [ -f requirements-docs.txt ]; then
+            pip install -r requirements-docs.txt
+          elif [ -f requirements.txt ]; then
+            pip install mkdocs mkdocs-material || pip install mkdocs
+          else
+            pip install mkdocs mkdocs-material || pip install mkdocs
+          fi
+
+      - name: Deploy to GitHub Pages
+        run: mkdocs gh-deploy --force --clean --verbose
