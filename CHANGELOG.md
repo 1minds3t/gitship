@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-02-25
+
+Documentation Platform & Release Workflow Optimization
+
+🚀 **Documentation Engineering Platform**
+- **MkDocs Integration:** Added `docbuilder.py`, a robust documentation management system with collision detection, metadata migration, and dual navigation modes (manual vs. awesome-pages).
+- **Deployment Suite:** Added `mkdocs_deploy.py` for one-click deployment options:
+  - **Local:** Safe port finding and foreground preview.
+  - **Persistent:** Auto-generated `systemd` user services to keep docs alive 24/7.
+  - **GitHub Pages:** Automated workflow generation and `gh` CLI activation.
+
+⚡ **Release & Workflow Optimization**
+- **Instant Tag Picker:** Refactored `release.py` to use lazy fetching and smart defaults (`git describe`). This eliminates the massive delay caused by pre-fetching all remote tags in large repositories.
+- **Resilient Sync:** Hardened `sync.py` and `resolve_conflicts.py` to detect and recover from interrupted rebases/merges gracefully.
+- **Non-Blocking Git:** Switched to interactive execution (`GIT_EDITOR=true`) for merge/amend operations to prevent the CLI from hanging on background editors.
+
+🛠️ **CLI Power Tools**
+- **Tag & Stash Managers:** Added dedicated interactive menus for managing git tags and stashes.
+- **PyPI Source Diff:** The release flow can now download published PyPI source distributions and diff them directly against the local working tree when no matching git tag exists.
+- **Advanced Review:** Enhanced commit review with pagination, per-file diff browsing, and binary file detection.
+- **Branch Health:** Added automated detection and fixing for broken upstream tracking (e.g., "[gone]" branches).
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/branch.py (554 lines changed)
+- UPDATE: src/gitship/cli.py (86 lines changed)
+- UPDATE: src/gitship/commit.py (870 lines changed)
+- UPDATE: src/gitship/config.py (55 lines changed)
+- UPDATE: src/gitship/deps.py (81 lines changed)
+- UPDATE: src/gitship/gitops.py (38 lines changed)
+- UPDATE: src/gitship/merge_message.py (128 lines changed)
+- UPDATE: src/gitship/pypi.py (20 lines changed)
+- UPDATE: src/gitship/release.py (497 lines changed)
+- UPDATE: src/gitship/resolve_conflicts.py (429 lines changed)
+- UPDATE: src/gitship/review.py (390 lines changed)
+- NEW: src/gitship/stash.py (264 lines changed)
+- UPDATE: src/gitship/sync.py (514 lines changed)
+- NEW: src/gitship/tag.py (619 lines changed)
+
+**📚 Documentation:**
+- docs/index.md (3 lines)
+- mkdocs.yml (6 lines)
+- src/gitship/docbuilder.py (1019 lines)
+- src/gitship/docs.py (676 lines)
+- src/gitship/mkdocs_deploy.py (745 lines)
+
+**⚙️ Configuration:**
+- config.json (0 lines)
+
+**Additional Changes:**
+- feat(docs): integrate MkDocs builder, deployment suite, and optimized release workflow
+- feat(cli): add tag/stash managers, PyPI diffs, and adv review
+
+_21 files changed, 5946 insertions(+), 1088 deletions(-)_
+
 ## [0.5.0] — 2026-02-21
 
 CI Regression Debugger & Smart Workflow Engine
