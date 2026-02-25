@@ -1,0 +1,1500 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for gitship">
+      
+      
+      
+      
+        <link rel="prev" href="../BRANCH/">
+      
+      
+        <link rel="next" href="../QUICKSTART/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.3">
+    
+    
+      
+        <title>Gitship v0.2.0 - Deployment Summary - gitship</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#gitship-v020-deployment-summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="gitship" class="md-header__button md-logo" aria-label="gitship" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            gitship
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Gitship v0.2.0 - Deployment Summary
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="gitship" class="md-nav__button md-logo" aria-label="gitship" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    gitship
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gitship
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../BRANCH/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gitship Branch Management - Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gitship v0.2.0 - Deployment Summary
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gitship v0.2.0 - Deployment Summary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#whats-been-created" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📦 What's Been Created
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="📦 What&#39;s Been Created">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Features
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#package-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🚀 Deployment Steps
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🚀 Deployment Steps">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-setup-local-repository" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Setup Local Repository
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-create-github-repository" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Create GitHub Repository
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-push-to-github" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Push to GitHub
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-verify-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Verify Installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#usage-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📝 Usage Examples
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="📝 Usage Examples">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#interactive-menu" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive Menu
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#review-changes-since-last-tag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Review Changes Since Last Tag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export-diff-between-tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Export Diff Between Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configure-export-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure Export Path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#view-specific-number-of-commits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        View Specific Number of Commits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reviewgit-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔧 reviewgit Features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#export-file-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📂 Export File Structure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#use-cases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🎯 Use Cases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🎯 Use Cases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-release-preparation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Release Preparation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-code-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Code Review
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Documentation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Debugging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔄 Workflow Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🔄 Workflow Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#for-omnipkg-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For omnipkg Development
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#automated-release-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Automated Release Notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📊 Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🧪 Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📚 Documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🎉 Next Steps
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#important-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🚨 Important Notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pro-tips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        💡 Pro Tips
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔗 Links
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../QUICKSTART/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gitship Quick Start Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#whats-been-created" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📦 What's Been Created
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="📦 What&#39;s Been Created">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Features
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#package-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🚀 Deployment Steps
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🚀 Deployment Steps">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-setup-local-repository" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Setup Local Repository
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-create-github-repository" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Create GitHub Repository
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-push-to-github" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Push to GitHub
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-verify-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Verify Installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#usage-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📝 Usage Examples
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="📝 Usage Examples">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#interactive-menu" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive Menu
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#review-changes-since-last-tag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Review Changes Since Last Tag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export-diff-between-tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Export Diff Between Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configure-export-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure Export Path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#view-specific-number-of-commits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        View Specific Number of Commits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reviewgit-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔧 reviewgit Features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#export-file-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📂 Export File Structure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#use-cases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🎯 Use Cases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🎯 Use Cases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-release-preparation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Release Preparation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-code-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Code Review
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Documentation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Debugging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔄 Workflow Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="🔄 Workflow Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#for-omnipkg-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For omnipkg Development
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#automated-release-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Automated Release Notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📊 Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🧪 Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        📚 Documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🎉 Next Steps
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#important-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🚨 Important Notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pro-tips" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        💡 Pro Tips
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        🔗 Links
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="gitship-v020-deployment-summary">Gitship v0.2.0 - Deployment Summary</h1>
+<h2 id="whats-been-created">📦 What's Been Created</h2>
+<p>A complete, production-ready Python package with:</p>
+<h3 id="core-features">Core Features</h3>
+<ol>
+<li><strong>Main CLI Interface</strong> (<code>gitship</code> command)</li>
+<li>Interactive menu system</li>
+<li>Argparse-based commands</li>
+<li>
+<p>Repository specification support</p>
+</li>
+<li>
+<p><strong>checkgit</strong> - Commit inspector with configurable count</p>
+</li>
+<li><strong>fixgit</strong> - Selective file restorer  </li>
+<li><strong>reviewgit</strong> - NEW! Comprehensive diff analyzer</li>
+<li><strong>config</strong> - Configuration management system</li>
+</ol>
+<h3 id="package-structure">Package Structure</h3>
+<pre><code>gitship_complete/
+├── src/
+│   └── gitship/
+│       ├── __init__.py         # Package initialization
+│       ├── cli.py              # Main CLI entry point
+│       ├── checkgit.py         # Commit inspector
+│       ├── fixgit.py           # File restorer
+│       ├── reviewgit.py        # NEW: Diff analyzer
+│       └── config.py           # Configuration management
+├── tests/
+│   ├── __init__.py
+│   ├── test_basic.py           # Basic tests
+│   └── test_reviewgit.py       # Reviewgit tests
+├── docs/
+├── pyproject.toml              # Package configuration
+├── setup_gitship.sh            # Setup script
+├── README.md                   # Comprehensive documentation
+├── QUICKSTART.md               # Quick start guide
+├── CHANGELOG.md                # Version history
+├── CONTRIBUTING.md             # Contribution guidelines
+├── LICENSE                     # MIT license
+├── MANIFEST.in                 # Package manifest
+└── .gitignore                  # Git ignore rules
+</code></pre>
+<h2 id="deployment-steps">🚀 Deployment Steps</h2>
+<h3 id="1-setup-local-repository">1. Setup Local Repository</h3>
+<pre><code class="language-bash">cd ~/gitship
+# Copy all files from gitship_complete/ to ~/gitship/
+cp -r /path/to/gitship_complete/* .
+
+# Run setup script
+chmod +x setup_gitship.sh
+./setup_gitship.sh
+</code></pre>
+<p>The setup script will:
+- Initialize git repository
+- Create initial commit
+- Set up directory structure
+- Install in development mode
+- Run tests
+- Create v0.2.0 tag</p>
+<h3 id="2-create-github-repository">2. Create GitHub Repository</h3>
+<ol>
+<li>Go to https://github.com/new</li>
+<li>Repository name: <code>gitship</code></li>
+<li>Description: "Interactive Git history management and commit inspection tools"</li>
+<li>Public repository</li>
+<li>Don't initialize with README (we have one)</li>
+<li>Create repository</li>
+</ol>
+<h3 id="3-push-to-github">3. Push to GitHub</h3>
+<pre><code class="language-bash">cd ~/gitship
+
+# Add remote
+git remote add origin https://github.com/1minds3t/gitship.git
+
+# Push everything
+git push -u origin main --tags
+</code></pre>
+<h3 id="4-verify-installation">4. Verify Installation</h3>
+<pre><code class="language-bash"># Test commands
+gitship --help
+checkgit --help
+reviewgit --help
+
+# Test in a git repo
+cd ~/omnipkg  # or any git repo
+checkgit
+</code></pre>
+<h2 id="usage-examples">📝 Usage Examples</h2>
+<h3 id="interactive-menu">Interactive Menu</h3>
+<pre><code class="language-bash">gitship
+</code></pre>
+<h3 id="review-changes-since-last-tag">Review Changes Since Last Tag</h3>
+<pre><code class="language-bash">cd ~/omnipkg
+reviewgit
+# Select option 4 to export everything
+</code></pre>
+<h3 id="export-diff-between-tags">Export Diff Between Tags</h3>
+<pre><code class="language-bash">gitship reviewgit --from v0.1.0 --to v0.2.0 --export
+</code></pre>
+<h3 id="configure-export-path">Configure Export Path</h3>
+<pre><code class="language-bash">gitship config --set-export-path ~/omnipkg_git_cleanup
+</code></pre>
+<h3 id="view-specific-number-of-commits">View Specific Number of Commits</h3>
+<pre><code class="language-bash">gitship checkgit -n 20
+</code></pre>
+<h2 id="reviewgit-features">🔧 reviewgit Features</h2>
+<p>The star of v0.2.0! This new command provides:</p>
+<ol>
+<li><strong>Diff Statistics</strong></li>
+<li>Shows summary of changes between any two references</li>
+<li>
+<p>File-by-file breakdown</p>
+</li>
+<li>
+<p><strong>Commit Messages</strong></p>
+</li>
+<li>All commit messages with full descriptions</li>
+<li>
+<p>Chronological order</p>
+</li>
+<li>
+<p><strong>Individual Commit Stats</strong></p>
+</li>
+<li>See what each commit changed</li>
+<li>
+<p>Detailed file statistics</p>
+</li>
+<li>
+<p><strong>Export Everything</strong></p>
+</li>
+<li>
+<p>Creates structured text file with:</p>
+<ul>
+<li>Summary statistics</li>
+<li>All commit messages and descriptions</li>
+<li>Individual commit stats</li>
+<li>Full diff content</li>
+</ul>
+</li>
+<li>
+<p><strong>Structured Filenames</strong></p>
+</li>
+<li>Format: <code>&lt;repo&gt;_diff_&lt;from&gt;_to_&lt;to&gt;_&lt;timestamp&gt;.txt</code></li>
+<li>Example: <code>omnipkg_diff_v0.1.0_to_HEAD_20260212_213045.txt</code></li>
+<li>
+<p>Easy to find historical reviews</p>
+</li>
+<li>
+<p><strong>Flexible References</strong></p>
+</li>
+<li>Tags: <code>v1.0.0</code>, <code>v2.0.0</code></li>
+<li>Branches: <code>main</code>, <code>development</code></li>
+<li>Commits: SHA hashes</li>
+<li>Special: <code>HEAD</code></li>
+</ol>
+<h2 id="export-file-structure">📂 Export File Structure</h2>
+<p>When you export a diff, you get a comprehensive text file:</p>
+<pre><code>================================================================================
+GIT DIFF EXPORT: omnipkg
+================================================================================
+From: v0.1.0
+To: HEAD
+Generated: 2026-02-12 21:30:45
+Total commits: 7
+================================================================================
+
+SUMMARY STATISTICS
+================================================================================
+[git diff --stat output showing all changed files]
+
+COMMIT HISTORY
+================================================================================
+[All commits with full messages, descriptions, and individual stats]
+
+FULL DIFF
+================================================================================
+[Complete unified diff]
+</code></pre>
+<h2 id="use-cases">🎯 Use Cases</h2>
+<h3 id="1-release-preparation">1. Release Preparation</h3>
+<pre><code class="language-bash"># Review what's changed since last release
+cd ~/omnipkg
+gitship reviewgit --export
+
+# File saved to: ~/omnipkg_git_cleanup/omnipkg_diff_v0.1.0_to_HEAD_&lt;timestamp&gt;.txt
+</code></pre>
+<h3 id="2-code-review">2. Code Review</h3>
+<pre><code class="language-bash"># See all commits in detail
+gitship checkgit -n 20
+
+# Export specific range
+gitship reviewgit --from main --to feature-branch --export
+</code></pre>
+<h3 id="3-documentation">3. Documentation</h3>
+<pre><code class="language-bash"># Generate changelog between versions
+gitship reviewgit --from v1.0.0 --to v2.0.0 --export
+</code></pre>
+<h3 id="4-debugging">4. Debugging</h3>
+<pre><code class="language-bash"># Find when changes were made
+checkgit
+
+# Revert specific files
+fixgit &lt;commit-sha&gt;
+</code></pre>
+<h2 id="workflow-integration">🔄 Workflow Integration</h2>
+<h3 id="for-omnipkg-development">For omnipkg Development</h3>
+<pre><code class="language-bash"># 1. Make changes and commit
+cd ~/omnipkg
+# ... make changes ...
+git add .
+git commit -m &quot;feat: new feature&quot;
+
+# 2. Review before release
+gitship reviewgit --export
+
+# 3. Check the export
+ls ~/omnipkg_git_cleanup/omnipkg_diff_*
+
+# 4. Tag and release
+git tag v0.2.1
+git push origin main --tags
+</code></pre>
+<h3 id="automated-release-notes">Automated Release Notes</h3>
+<pre><code class="language-bash"># Script to generate release notes for last 5 tags
+cd ~/omnipkg
+for tag in $(git tag | tail -n 5); do
+    gitship reviewgit --from $tag --to HEAD --export
+done
+</code></pre>
+<h2 id="configuration">📊 Configuration</h2>
+<p>Default config at <code>~/.gitship/config.json</code>:</p>
+<pre><code class="language-json">{
+  &quot;export_path&quot;: &quot;~/omnipkg_git_cleanup&quot;,
+  &quot;auto_push&quot;: true,
+  &quot;default_commit_count&quot;: 10
+}
+</code></pre>
+<p>Modify via:</p>
+<pre><code class="language-bash">gitship config --set-export-path /your/path
+</code></pre>
+<p>Or edit directly:</p>
+<pre><code class="language-bash">nano ~/.gitship/config.json
+</code></pre>
+<h2 id="testing">🧪 Testing</h2>
+<pre><code class="language-bash">cd ~/gitship
+pytest tests/ -v
+</code></pre>
+<h2 id="documentation">📚 Documentation</h2>
+<ul>
+<li><strong>README.md</strong> - Full documentation with all features</li>
+<li><strong>QUICKSTART.md</strong> - Get started in 5 minutes</li>
+<li><strong>CHANGELOG.md</strong> - Version history and changes</li>
+<li><strong>CONTRIBUTING.md</strong> - How to contribute</li>
+</ul>
+<h2 id="next-steps">🎉 Next Steps</h2>
+<ol>
+<li><strong>Deploy to GitHub</strong> (see step 3 above)</li>
+<li><strong>Test thoroughly</strong> in your omnipkg repository</li>
+<li><strong>Use reviewgit</strong> to generate release notes</li>
+<li><strong>Configure export path</strong> to your preferred location</li>
+<li><strong>Share with team</strong> or publish to PyPI</li>
+</ol>
+<h2 id="important-notes">🚨 Important Notes</h2>
+<ul>
+<li>All operations are logged to <code>/var/log/</code> or <code>/tmp/</code></li>
+<li>Exports are timestamped for historical tracking</li>
+<li>Configuration persists across sessions</li>
+<li>Safe operations with confirmations before destructive changes</li>
+</ul>
+<h2 id="pro-tips">💡 Pro Tips</h2>
+<ol>
+<li>
+<p><strong>Set up export path early</strong>:
+   <code>bash
+   gitship config --set-export-path ~/omnipkg_git_cleanup</code></p>
+</li>
+<li>
+<p><strong>Use aliases</strong> for common operations:
+   <code>bash
+   alias gr='gitship reviewgit --export'
+   alias gc='gitship checkgit'</code></p>
+</li>
+<li>
+<p><strong>Keep historical exports</strong>:
+   <code>bash
+   # Your exports are automatically timestamped
+   # Create a git repo to version them!
+   cd ~/omnipkg_git_cleanup
+   git init
+   git add .
+   git commit -m "Historical diffs"</code></p>
+</li>
+<li>
+<p><strong>Automate changelog generation</strong>:
+   <code>bash
+   # Add to your release script
+   gitship reviewgit --from $(git describe --tags --abbrev=0) --to HEAD --export</code></p>
+</li>
+</ol>
+<h2 id="links">🔗 Links</h2>
+<ul>
+<li>Repository: https://github.com/1minds3t/gitship</li>
+<li>Issues: https://github.com/1minds3t/gitship/issues</li>
+<li>Author: 1minds3t</li>
+</ul>
+<hr />
+<p><strong>Version</strong>: 0.2.0<br />
+<strong>Date</strong>: 2026-02-12<br />
+<strong>Status</strong>: Ready for deployment ✅</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": [], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
