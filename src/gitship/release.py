@@ -173,79 +173,147 @@ def _push_local_tags_to_remote(repo_path: Path, tags: list) -> list:
     return tags
 
 
+def _fetch_specific_tag(repo_path: Path, tag_name: str) -> bool:
+    """
+    Check if a specific tag exists on remote and fetch ONLY that tag.
+    Returns True if found and fetched, False otherwise.
+    """
+    print(f"  {Colors.DIM}Checking remote for '{tag_name}'...{Colors.RESET}", end="", flush=True)
+    
+    # Check if it exists on remote
+    try:
+        check = subprocess.run(
+            ["git", "ls-remote", "--tags", "origin", tag_name],
+            cwd=repo_path, capture_output=True, text=True
+        )
+        
+        # Check if the output actually contains the ref (exact match preferred)
+        if check.returncode == 0 and tag_name in check.stdout:
+            print(f"\r  {Colors.GREEN}Found on remote. Fetching...{Colors.RESET}   ")
+            # Fetch just that specific tag
+            subprocess.run(
+                ["git", "fetch", "origin", f"refs/tags/{tag_name}:refs/tags/{tag_name}"],
+                cwd=repo_path, capture_output=True
+            )
+            return True
+    except Exception:
+        pass
+    
+    print(f"\r  {Colors.YELLOW}Not found on remote.{Colors.RESET}        ")
+    return False
+
 def _pick_review_tag(repo_path: Path, suggested_from: str) -> str:
     """
-    Let the user choose which tag to compare HEAD against.
-    Shows all local tags (all branches), highlights the suggested one.
-    Returns the chosen tag/ref, or empty string to skip review.
+    Optimized tag picker.
+    1. Defaults to closest ancestor tag (git describe).
+    2. Shows max 10 recent tags (local only).
+    3. Allows manual entry with lazy remote fetching.
     """
-    # Fetch remote tags so we have the full picture
-    print(f"  {Colors.DIM}Fetching remote tags...{Colors.RESET}", flush=True)
-    subprocess.run(["git", "fetch", "--tags", "origin"],
-                   cwd=repo_path, capture_output=True)
+    # 1. Determine the "Smart Default" (Closest ancestor tag)
+    closest_tag = ""
+    try:
+        # --abbrev=0 finds the closest tag reachable from HEAD
+        res = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"], 
+            cwd=repo_path, capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            closest_tag = res.stdout.strip()
+    except Exception:
+        pass
 
-    tags = _get_all_local_tags(repo_path)
+    # Use passed suggestion if provided (e.g. from previous run), otherwise closest
+    default_ref = suggested_from if suggested_from else closest_tag
 
-    # Also fetch unpushed tags from origin (already merged by fetch above)
-    if not tags:
-        print(f"  {Colors.YELLOW}No tags found locally or on remote.{Colors.RESET}")
-        return ""
+    # 2. Get list of recent local tags (Max 10, newest first)
+    try:
+        tags_raw = run_git(["tag", "--sort=-creatordate"], cwd=repo_path, check=False)
+        all_tags = [t.strip() for t in tags_raw.splitlines() if t.strip()]
+        recent_tags = all_tags[:10]
+    except Exception:
+        recent_tags = []
 
-    # Offer to push unpushed tags before the pick
-    _push_local_tags_to_remote(repo_path, tags)
+    print(f"\n{Colors.BOLD}Select comparison base:{Colors.RESET}")
+    
+    if default_ref:
+        print(f"  {Colors.CYAN}Suggested: {default_ref}{Colors.RESET} (Closest ancestor)")
+    
+    if recent_tags:
+        print(f"\n  {Colors.DIM}Recent local tags:{Colors.RESET}")
+        for i, tag in enumerate(recent_tags, 1):
+            marker = f" {Colors.GREEN}← current{Colors.RESET}" if tag == default_ref else ""
+            print(f"  {i:2d}. {tag}{marker}")
+    else:
+        print(f"\n  {Colors.DIM}(No local tags found){Colors.RESET}")
 
-    # Refresh tag list after any pushes
-    tags = _get_all_local_tags(repo_path)
-
-    print(f"\n{Colors.BOLD}Select comparison base (tags across all branches):{Colors.RESET}")
-    print(f"  {Colors.DIM}Suggested: {suggested_from}{Colors.RESET}")
     print()
-
-    # Group tags by rough category for readability
-    limit = min(len(tags), 20)
-    for i, tag in enumerate(tags[:limit], 1):
-        marker = f" {Colors.GREEN}← suggested{Colors.RESET}" if tag == suggested_from else ""
-        print(f"  {i:2d}. {tag}{marker}")
-    if len(tags) > limit:
-        print(f"       ... ({len(tags) - limit} more, enter tag name manually)")
-
-    print()
-    print(f"  Enter number, tag name, commit SHA, or branch name.")
-    print(f"  Press Enter to use suggested ({Colors.YELLOW}{suggested_from}{Colors.RESET}), or 's' to skip review.")
+    print(f"  Type a number, a specific tag name, or 's' to skip.")
+    print(f"  Press Enter to use suggested ({Colors.YELLOW}{default_ref or 'First Commit'}{Colors.RESET}).")
     print()
 
     try:
         raw = input("  From: ").strip()
     except (KeyboardInterrupt, EOFError):
-        return suggested_from
+        return default_ref
 
+    # Case A: User skipped
     if raw.lower() == "s":
         return ""
+    
+    # Case B: User pressed Enter (Use Default)
     if not raw:
-        return suggested_from
+        return default_ref
+
+    # Case C: User typed a number
     if raw.isdigit():
         idx = int(raw) - 1
-        if 0 <= idx < len(tags):
-            return tags[idx]
+        if 0 <= idx < len(recent_tags):
+            return recent_tags[idx]
         print(f"  {Colors.YELLOW}Index out of range, using suggested.{Colors.RESET}")
-        return suggested_from
-    # Raw ref name — validate it exists (locally or after fetch)
-    check = subprocess.run(
-        ["git", "rev-parse", "--verify", raw],
-        cwd=repo_path, capture_output=True, text=True
-    )
-    if check.returncode == 0:
-        return raw
-    # Try as remote ref
-    check2 = subprocess.run(
-        ["git", "rev-parse", "--verify", f"origin/{raw}"],
-        cwd=repo_path, capture_output=True, text=True
-    )
-    if check2.returncode == 0:
-        return f"origin/{raw}"
-    print(f"  {Colors.YELLOW}Could not resolve '{raw}', using suggested.{Colors.RESET}")
-    return suggested_from
+        return default_ref
 
+    # Case D: User typed a manual tag/ref name
+    
+    # Check local existence first (fastest)
+    if _ref_exists_locally(repo_path, raw):
+        return raw
+
+    # Not found locally. Ask to check remote?
+    print(f"  {Colors.YELLOW}Ref '{raw}' not found locally.{Colors.RESET}")
+    
+    # Show GitHub URL helper
+    try:
+        remote_url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo_path, capture_output=True, text=True
+        ).stdout.strip()
+        if "github.com" in remote_url:
+            # Clean up git@ or .git suffix
+            clean_url = remote_url.replace("git@github.com:", "https://github.com/").replace(".git", "")
+            print(f"  {Colors.DIM}Browse valid tags at: {clean_url}/tags{Colors.RESET}")
+    except Exception:
+        pass
+
+    do_fetch = input(f"  Check remote origin for '{raw}'? (y/n): ").strip().lower()
+    
+    if do_fetch == 'y':
+        if _fetch_specific_tag(repo_path, raw):
+            return raw
+        
+        # Retry once
+        print(f"  {Colors.RED}Could not find '{raw}' anywhere.{Colors.RESET}")
+        retry = input("  Enter another tag name, or press Enter to use default: ").strip()
+        
+        if retry:
+            # Check local
+            if _ref_exists_locally(repo_path, retry):
+                return retry
+            # Check remote one last time
+            if _fetch_specific_tag(repo_path, retry):
+                return retry
+
+    print(f"  {Colors.DIM}Falling back to suggested: {default_ref}{Colors.RESET}")
+    return default_ref
 
 def show_review_before_changelog(repo_path: Path, from_ref: str, to_ref: str = "HEAD") -> tuple:
     """

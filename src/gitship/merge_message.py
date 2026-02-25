@@ -6,6 +6,8 @@ Uses the proven changelog_generator logic instead of reinventing the wheel.
 """
 
 import subprocess
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,25 @@ except ImportError:
             check=False
         )
         return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _run_git_interactive(args, cwd) -> int:
+    """
+    Run a git command with full TTY I/O and GIT_EDITOR=true so it never
+    blocks waiting for an editor. Returns the exit code.
+    """
+    env = os.environ.copy()
+    env["GIT_EDITOR"] = "true"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=cwd,
+        env=env,
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+    return result.returncode
 
 
 def _get_commits_in_range(repo_path, base_ref, head_ref):
@@ -354,15 +375,18 @@ def generate_merge_message(
 
 
 def amend_last_commit_message(repo_path: Path, new_message: str) -> bool:
-    """Amend the last commit with a new message."""
+    """
+    Amend the last commit with a new message.
+
+    Uses _run_git_interactive so the process has full TTY access and
+    GIT_EDITOR=true ensures no editor can block the shell.
+    -m passes the message directly so no editor is opened in the first place.
+    """
     try:
-        result = subprocess.run(
-            ["git", "commit", "--amend", "-m", new_message],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=False
+        rc = _run_git_interactive(
+            ["commit", "--amend", "-m", new_message],
+            cwd=repo_path
         )
-        return result.returncode == 0
+        return rc == 0
     except Exception:
         return False

@@ -132,10 +132,12 @@ def show_menu(repo_path: Path):
     elif choice == "10":
         from gitship import docs
         print("\nDocs Options:")
-        print("  1. Interactive editor (edit sections)")
+        print("  1. Interactive README editor (edit sections)")
         print("  2. Generate default README")
-        print("  3. Update from file")
-        sub = input("Choice (1-3): ").strip()
+        print("  3. Update README from file")
+        print("  4. MkDocs site builder (docbuilder)")
+        print("  5. Deploy docs (local / GitHub Pages / systemd)")
+        sub = input("Choice (1-5): ").strip()
         if sub == "1":
             docs.main_with_args(repo_path, edit=True)
         elif sub == "2":
@@ -144,6 +146,10 @@ def show_menu(repo_path: Path):
             src = input("Source file path: ").strip()
             if src:
                 docs.main_with_args(repo_path, source=src)
+        elif sub == "4":
+            docs.main_with_args(repo_path, mkdocs=True)
+        elif sub == "5":
+            docs.main_with_args(repo_path, deploy=True)
     elif choice == "11":
         from gitship import resolve_conflicts
         resolve_conflicts.main()
@@ -427,6 +433,12 @@ Commands:
     docs_parser.add_argument('--generate', action='store_true',
                              help='Generate default README with current features')
     docs_parser.add_argument('--source', type=str, help='Update README from source file')
+    docs_parser.add_argument('--mkdocs', action='store_true',
+                             help='Launch MkDocs site builder (requires docbuilder.py alongside docs.py)')
+    docs_parser.add_argument('--dry-run', action='store_true',
+                             help='Preview changes without writing files (used with --mkdocs)')
+    docs_parser.add_argument('--deploy', action='store_true',
+                             help='Open deployment menu (local serve / GitHub Pages / systemd)')
     
     # resolve subcommand
     subparsers.add_parser('resolve', help='Interactive merge conflict resolver')
@@ -746,7 +758,9 @@ Commands:
     elif args.command == 'docs':
         from gitship import docs
         docs.main_with_args(repo_path, source=args.source,
-                            generate=args.generate, edit=args.edit)
+                            generate=args.generate, edit=args.edit,
+                            mkdocs=args.mkdocs, dry_run=args.dry_run,
+                            deploy=args.deploy)
     
     elif args.command == 'resolve':
         from gitship import resolve_conflicts
