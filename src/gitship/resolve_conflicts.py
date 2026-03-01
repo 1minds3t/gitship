@@ -105,7 +105,7 @@ def show_conflict(filepath: str, block_num: int, block: dict, total: int):
     print("\n" + "=" * 80)
 
 
-def resolve_conflict_interactive(filepath: str) -> bool:
+def resolve_conflict_interactive(filepath: str, ours_label: str = 'OURS (local)', theirs_label: str = 'THEIRS (incoming)') -> bool:
     """Interactively resolve conflicts in a file."""
     path = Path(filepath)
     if not path.exists():
@@ -120,11 +120,13 @@ def resolve_conflict_interactive(filepath: str) -> bool:
         return False
 
     print(f"\n📝 Found {len(blocks)} conflict(s) in {filepath}")
+    print(f"  🔵 O = OURS   → keep '{ours_label}'")
+    print(f"  🔴 T = THEIRS → keep '{theirs_label}'")
     print("\nHow do you want to resolve this file?")
     print("  V - VIEW full diff first")
     print("  F - Save full diff to FILE")
-    print("  O - Keep ALL blocks as OURS (local)")
-    print("  T - Keep ALL blocks as THEIRS (remote/incoming)")
+    print(f"  O - Keep ALL blocks as OURS   ('{ours_label}')")
+    print(f"  T - Keep ALL blocks as THEIRS ('{theirs_label}')")
     print("  B - Resolve BLOCK-BY-BLOCK (choose per conflict)")
     print("  S - Skip this file")
     print("  Q - Quit resolver")
@@ -197,8 +199,8 @@ def resolve_conflict_interactive(filepath: str) -> bool:
                 print(f"\n✓ Saved to: {output_file}")
 
         print("\nNow choose resolution:")
-        print("  O - Keep ALL as OURS (local)")
-        print("  T - Keep ALL as THEIRS (remote/incoming)")
+        print(f"  O - Keep ALL as OURS   ('{ours_label}')")
+        print(f"  T - Keep ALL as THEIRS ('{theirs_label}')")
         print("  B - Resolve BLOCK-BY-BLOCK")
         print("  S - Skip this file")
         choice = input("\nChoice (O/T/B/S): ").strip().upper()
@@ -355,7 +357,7 @@ def run_git_interactive(args, extra_env: dict = None) -> int:
     return result.returncode
 
 
-def _complete_operation(in_rebase: bool, in_cherry_pick: bool) -> bool:
+def _complete_operation(in_rebase: bool, in_cherry_pick: bool, ours_label: str = "", theirs_label: str = "") -> bool:
     """
     After all conflicts are resolved, run git rebase --continue (or equivalent)
     and report success/failure. Returns True if operation completed cleanly.
@@ -393,9 +395,95 @@ def _complete_operation(in_rebase: bool, in_cherry_pick: bool) -> bool:
             return False
 
     else:
-        # Plain merge
-        print("\n▶  Running: git commit --no-edit (completing merge)")
-        rc = run_git_interactive(["commit", "--no-edit"])
+        # Plain merge — try --no-edit first (works when MERGE_MSG exists).
+        # When MERGE_HEAD was never written (interrupted stash path) there is
+        # no MERGE_MSG, so git commit --no-edit fails with "empty message".
+        # In that case fall back to generating a message via merge_message.py.
+        import subprocess as _sp
+        repo_path = Path(".")
+
+        merge_msg_file = Path(".git") / "MERGE_MSG"
+        has_merge_msg = merge_msg_file.exists() and merge_msg_file.read_text().strip()
+
+        if has_merge_msg:
+            print("\n▶  Running: git commit --no-edit (completing merge)")
+            rc = run_git_interactive(["commit", "--no-edit"])
+            if rc == 0:
+                print("✅ Merge committed successfully!")
+                return True
+            # fall through to generated message on failure
+
+        # Generate a commit message using merge_message.generate_merge_message
+        print("\n📝 No MERGE_MSG found — generating merge commit message...")
+        try:
+            from gitship.merge_message import generate_merge_message
+        except ImportError:
+            import importlib.util, os as _os
+            _spec = importlib.util.spec_from_file_location(
+                "merge_message",
+                _os.path.join(_os.path.dirname(__file__), "merge_message.py")
+            )
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            generate_merge_message = _mod.generate_merge_message
+
+        # Determine base (our branch HEAD before merge started) and incoming
+        # branch. Use ORIG_HEAD if present (set by git before a merge), else
+        # fall back to HEAD. Incoming = what was being merged in (try to read
+        # from staged tree / name-rev of the other parent).
+        orig_head_file = Path(".git") / "ORIG_HEAD"
+        if orig_head_file.exists():
+            base_ref = orig_head_file.read_text().strip()
+        else:
+            base_ref = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True
+            ).stdout.strip()
+
+        # Try to find the incoming SHA from the merge parents in the index
+        # (git write-tree captures the staged merge state).
+        head_ref = _sp.run(
+            ["git", "rev-parse", "MERGE_HEAD"],
+            capture_output=True, text=True
+        ).stdout.strip()
+        if not head_ref:
+            # MERGE_HEAD is gone; use the tip of the branch that was being
+            # merged. Try to infer from stash or staged diff base.
+            head_ref = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True
+            ).stdout.strip()
+
+        try:
+            msg = generate_merge_message(repo_path, base_ref=base_ref, head_ref=head_ref)
+            # Patch the first line to use human-readable branch names if we have them
+            if ours_label and theirs_label:
+                msg_lines = msg.splitlines()
+                msg_lines[0] = f"Merge {theirs_label} → {ours_label}"
+                msg = "\n".join(msg_lines)
+        except Exception as e:
+            src = theirs_label or "development"
+            tgt = ours_label or "developer-port"
+            msg = f"Merge {src} → {tgt} (resolved conflicts)\n\nAuto-generated after manual conflict resolution.\n\nError generating detailed message: {e}"
+
+        print("\n📋 Generated commit message:")
+        print("─" * 60)
+        print(msg[:800] + ("..." if len(msg) > 800 else ""))
+        print("─" * 60)
+
+        edit = input("\nEdit message before committing? (y/n, default=n): ").strip().lower()
+        if edit == "y":
+            import tempfile, os as _os, subprocess as _sp2
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+                tf.write(msg)
+                tmp = tf.name
+            editor = _os.environ.get("VISUAL") or _os.environ.get("EDITOR") or "nano"
+            _sp2.call([editor, tmp])
+            msg = open(tmp).read()
+            _os.unlink(tmp)
+
+        print("\n▶  Running: git commit -m <generated message>")
+        rc = run_git_interactive(["commit", "-m", msg])
         if rc == 0:
             print("✅ Merge committed successfully!")
             return True
@@ -411,8 +499,47 @@ def main():
     in_cherry_pick = (git_dir / "CHERRY_PICK_HEAD").exists()
 
     if not in_rebase and not in_merge and not in_cherry_pick:
-        print("❌ Not in a rebase, merge, or cherry-pick state")
-        sys.exit(1)
+        # Fallback 1: conflict markers still present (interrupted stash path)
+        if get_conflicted_files():
+            in_merge = True  # treat as plain merge: resolve + git commit
+        else:
+            # Fallback 2: conflicts already resolved & staged but no MERGE_HEAD
+            # and no MERGE_MSG — happens when a previous run resolved everything
+            # but the commit step failed (e.g. empty message).
+            # Detect via: staged changes exist + ORIG_HEAD exists (set by git
+            # before it started the merge, even in the broken path).
+            import subprocess as _sp2
+            _staged = _sp2.run(
+                ["git", "diff", "--cached", "--name-only"],
+                capture_output=True, text=True
+            ).stdout.strip()
+            _orig_head = (git_dir / "ORIG_HEAD").exists()
+            if _staged and _orig_head:
+                in_merge = True  # staged merge ready to commit, just needs a message
+            else:
+                print("❌ Not in a rebase, merge, or cherry-pick state")
+                sys.exit(1)
+
+    # Read current branch and merge source for display
+    import subprocess as _sp
+    _cur = _sp.run(["git", "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
+    _merge_head_file = git_dir / "MERGE_HEAD"
+    _merge_source = None
+    if _merge_head_file.exists():
+        _merge_sha = _merge_head_file.read_text().strip()
+        # Try to resolve SHA to a branch name
+        _name_res = _sp.run(["git", "name-rev", "--name-only", "--no-undefined", _merge_sha],
+                             capture_output=True, text=True)
+        if _name_res.returncode == 0:
+            _merge_source = _name_res.stdout.strip().replace("remotes/origin/", "").split("~")[0]
+
+    ours_label = _cur or "your branch (developer-port)"
+    # If both labels would be identical (e.g. merging origin/development into
+    # local development), make it obvious which is local and which is remote.
+    if _merge_source and _merge_source == _cur:
+        theirs_label = f"origin/{_merge_source} (remote)"
+    else:
+        theirs_label = _merge_source or "incoming branch (development)"
 
     # Describe what we're in
     if in_rebase:
@@ -428,16 +555,16 @@ def main():
     elif in_cherry_pick:
         label = "cherry-pick"
     else:
-        label = "merge"
+        label = f"merge  (OURS='{ours_label}'  ←  THEIRS='{theirs_label}')"
 
     files = get_conflicted_files()
 
     if not files:
         # No conflict markers — the operation just needs to be continued
-        print(f"✅ No conflicted files found! The {label} is ready to continue.")
-        auto = input(f"\nRun the continue command now to finish the {label}? (y/n): ").strip().lower()
+        print(f"✅ No conflicted files found! The {label} is ready to commit.")
+        auto = input(f"\nCommit the merge now? (y/n, default=y): ").strip().lower() or 'y'
         if auto == 'y':
-            _complete_operation(in_rebase, in_cherry_pick)
+            _complete_operation(in_rebase, in_cherry_pick, ours_label=ours_label, theirs_label=theirs_label)
         else:
             if in_rebase:
                 print("   When ready, run: git rebase --continue")
@@ -454,16 +581,18 @@ def main():
     print("\n" + "=" * 80)
     print("CONFLICT RESOLUTION OPTIONS")
     print("=" * 80)
+    print(f"  🔵 OURS   = '{ours_label}'  (your branch, local changes)")
+    print(f"  🔴 THEIRS = '{theirs_label}'  (incoming branch, their changes)")
     print("\n1. INTERACTIVE - Resolve each conflict individually (recommended)")
-    print("2. BULK OURS   - Keep ALL local changes (discard remote)")
-    print("3. BULK THEIRS - Keep ALL remote changes (discard local)")
+    print(f"2. BULK OURS   - Keep '{ours_label}' in all conflicts")
+    print(f"3. BULK THEIRS - Keep '{theirs_label}' in all conflicts")
     print("4. ABORT       - Abort the operation")
 
     choice = input("\nChoice (1-4): ").strip()
 
     if choice == '1':
         for filepath in files:
-            resolve_conflict_interactive(filepath)
+            resolve_conflict_interactive(filepath, ours_label=ours_label, theirs_label=theirs_label)
 
         remaining = get_conflicted_files()
         if remaining:
@@ -477,7 +606,7 @@ def main():
             # ── AUTO-CONTINUE ─────────────────────────────────────────────
             auto = input(f"\nContinue the {label} now? (y/n, default=y): ").strip().lower() or 'y'
             if auto == 'y':
-                ok = _complete_operation(in_rebase, in_cherry_pick)
+                ok = _complete_operation(in_rebase, in_cherry_pick, ours_label=ours_label, theirs_label=theirs_label)
                 if not ok and (in_rebase or in_cherry_pick):
                     # More rounds needed — recurse
                     new_files = get_conflicted_files()
@@ -498,7 +627,7 @@ def main():
         print("\n✅ All conflicts resolved with OURS")
         auto = input(f"\nContinue the {label} now? (y/n, default=y): ").strip().lower() or 'y'
         if auto == 'y':
-            _complete_operation(in_rebase, in_cherry_pick)
+            _complete_operation(in_rebase, in_cherry_pick, ours_label=ours_label, theirs_label=theirs_label)
         else:
             if in_rebase:
                 print("   When ready, run: git rebase --continue")
@@ -513,7 +642,7 @@ def main():
         print("\n✅ All conflicts resolved with THEIRS")
         auto = input(f"\nContinue the {label} now? (y/n, default=y): ").strip().lower() or 'y'
         if auto == 'y':
-            _complete_operation(in_rebase, in_cherry_pick)
+            _complete_operation(in_rebase, in_cherry_pick, ours_label=ours_label, theirs_label=theirs_label)
         else:
             if in_rebase:
                 print("   When ready, run: git rebase --continue")

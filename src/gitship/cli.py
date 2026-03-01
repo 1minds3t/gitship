@@ -14,7 +14,7 @@ from typing import Optional
 
 
 try:
-    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend, init, vscode_history, tag
+    from gitship import check, fix, review, release, commit, branch, publish, docs, sync, amend, init, vscode_history, tag, repair
     from gitship.config import load_config, get_default_export_path
 except ImportError:
     # For development/testing when not installed
@@ -54,11 +54,12 @@ def show_menu(repo_path: Path):
     print("  21. ci           - GitHub Actions: observe, create, edit, trigger workflows")
     print("  22. tag          - Manage tags (list, push, fetch, delete, sync)")
     print("  23. stash        - Manage stashes (list files, apply, pop, drop)")
+    print("  24. repair       - Diagnose and heal a corrupted git repository")
     print("  0. exit          - Exit gitship")
     print()
     
     try:
-        choice = input("Enter your choice (0-23): ").strip()
+        choice = input("Enter your choice (0-24): ").strip()
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         sys.exit(0)
@@ -185,6 +186,9 @@ def show_menu(repo_path: Path):
     elif choice == "23":
         from gitship import stash
         stash.run_stash_menu(repo_path)
+    elif choice == "24":
+        from gitship import repair
+        repair.main_with_repo(repo_path)
     elif choice == "0":
         print("Goodbye!")
         sys.exit(0)
@@ -232,6 +236,7 @@ Commands:
   ignore         - Manage .gitignore entries
   licenses       - Fetch license files for dependencies
   init           - Initialize or repair a git repository
+  repair         - Diagnose and heal a corrupted git repository
   vscode-history - Restore files from VSCode local edit history
   ci             - CI/CD observability and management (GitHub Actions, GitLab, Jenkins)
   tag            - Manage tags (list, create, push, fetch, delete, sync status)
@@ -500,6 +505,27 @@ Commands:
         help='Initialize a new git repository (or repair a corrupted one)'
     )
 
+    # repair subcommand
+    repair_parser = subparsers.add_parser(
+        'repair',
+        help='Diagnose and heal a corrupted git repository',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=textwrap.dedent("""\
+            Runs a 7-phase repair pipeline on the repository:
+              1. Assess  — git status + fsck to classify damage
+              2. Backup  — stash working tree to ~/.gitship/stash/
+              3. Cleanup — remove zero-byte corrupt objects
+              4. GC      — git gc --aggressive (non-destructive)
+              5. Fetch   — pull missing objects from remotes
+              6. Blobs   — re-stage files with missing blob objects
+              7. Report  — summarize what was fixed
+
+            Examples:
+              gitship repair                 # Repair current repo
+              gitship -r ~/myproject repair  # Repair a specific repo
+        """),
+    )
+
     # vscode-history subcommand
     vsc_parser = subparsers.add_parser(
         'vscode-history',
@@ -649,6 +675,11 @@ Commands:
     if args.command == 'init':
         from gitship import init
         init.main_with_repo(repo_path)
+        return
+
+    if args.command == 'repair':
+        from gitship import repair
+        repair.main_with_repo(repo_path)
         return
 
     if args.command == 'vscode-history':
@@ -855,6 +886,10 @@ Commands:
     elif args.command == 'stash':
         from gitship import stash
         stash.run_stash_menu(repo_path)
+
+    elif args.command == 'repair':
+        from gitship import repair
+        repair.main_with_repo(repo_path)
 
     else:
         # No command specified, show menu

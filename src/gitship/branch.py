@@ -16,6 +16,7 @@ import os
 import sys
 import signal
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -90,9 +91,22 @@ def run_git(args: List[str], repo_path: Path, capture_output: bool = True, check
 
 def get_current_branch(repo_path: Path) -> Optional[str]:
     """Get the name of the current branch."""
+    # Prefer --show-current (Git 2.22+): clean output, empty string on detached HEAD
+    result = run_git(["branch", "--show-current"], repo_path)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    
+    # Fallback: rev-parse --abbrev-ref (older Git)
     result = run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_path)
     if result.returncode == 0:
-        return result.stdout.strip()
+        name = result.stdout.strip()
+        # Strip spurious 'heads/' prefix that can appear with ambiguous ref names
+        if name.startswith("heads/"):
+            name = name[len("heads/"):]
+        # 'HEAD' means detached HEAD state
+        if name == "HEAD":
+            return None
+        return name
     return None
 
 
@@ -260,10 +274,81 @@ def confirm_and_delete_branch(repo_path: Path, branch_name: str, current_branch:
     
     Returns True if deleted, False if cancelled or failed.
     """
+    # Guard: refuse to delete the default branch outright
+    default_branch = get_default_branch(repo_path)
+    if branch_name == default_branch:
+        print(f"\n{Colors.BOLD}{Colors.RED}✗ Cannot delete '{branch_name}' — it is the default branch.{Colors.RESET}")
+        print(f"\n  To delete it you must first change the default branch:")
+        print(f"  {Colors.DIM}Use option 4 (Change default branch) to point the default elsewhere,{Colors.RESET}")
+        print(f"  {Colors.DIM}then you can delete '{branch_name}'.{Colors.RESET}")
+        offer = safe_input(f"\n{Colors.CYAN}Open 'Change default branch' now? (y/n):{Colors.RESET} ").strip().lower()
+        if offer == 'y':
+            # List candidates (all local branches except this one)
+            branches = list_branches(repo_path)
+            candidates = [b for b in branches['local'] if b != branch_name]
+            if not candidates:
+                print(f"{Colors.YELLOW}No other local branches to set as default.{Colors.RESET}")
+                return False
+            print(f"\n{Colors.BOLD}Select new default branch:{Colors.RESET}")
+            for i, b in enumerate(candidates, 1):
+                print(f"  {i}. {b}")
+            sel = safe_input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
+            new_default = None
+            if sel.isdigit():
+                idx = int(sel) - 1
+                if 0 <= idx < len(candidates):
+                    new_default = candidates[idx]
+            elif sel:
+                new_default = sel
+            if new_default:
+                change_default_branch(repo_path, new_default)
+                print(f"\n{Colors.DIM}Default changed. You can now delete '{branch_name}' if you want.{Colors.RESET}")
+        return False
+
     # Check remote existence
     remote_check = run_git(["ls-remote", "--heads", "origin", branch_name], repo_path, check=False)
     has_remote = bool(remote_check.stdout.strip())
-    
+
+    # Guard: can't delete the branch you're on — offer to switch away first
+    actual_current = get_current_branch(repo_path)
+    if branch_name == actual_current:
+        print(f"\n{Colors.YELLOW}⚠️  '{branch_name}' is your currently checked-out branch.{Colors.RESET}")
+        print(f"  Git won't allow deleting it while you're on it.")
+        
+        branches_info = list_branches(repo_path)
+        candidates = [b for b in branches_info['local'] if b != branch_name]
+        if not candidates:
+            print(f"{Colors.RED}  No other branches to switch to. Cannot proceed.{Colors.RESET}")
+            return False
+        
+        print(f"\n  Switch to another branch first:")
+        for i, b in enumerate(candidates, 1):
+            default_marker = f" {Colors.BRIGHT_CYAN}(default){Colors.RESET}" if b == default_branch else ""
+            print(f"    {i}. {b}{default_marker}")
+        
+        sel = safe_input(f"\n{Colors.CYAN}Switch to (number/name, or Enter to cancel):{Colors.RESET} ").strip()
+        if not sel:
+            print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+            return False
+        
+        switch_target = None
+        if sel.isdigit():
+            idx = int(sel) - 1
+            if 0 <= idx < len(candidates):
+                switch_target = candidates[idx]
+        else:
+            switch_target = sel
+        
+        if not switch_target:
+            print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
+            return False
+        
+        switched = switch_branch(repo_path, switch_target)
+        if not switched:
+            return False
+        # Update current_branch for the rest of this call
+        current_branch = switch_target
+
     # Check for unmerged commits
     unmerged = run_git(["log", "--oneline", f"HEAD..{branch_name}"], repo_path)
     unmerged_count = len([l for l in unmerged.stdout.strip().split('\n') if l])
@@ -307,11 +392,6 @@ def confirm_and_delete_branch(repo_path: Path, branch_name: str, current_branch:
         print(f"{Colors.RED}✗ Name didn't match. Branch NOT deleted.{Colors.RESET}")
         return False
     
-    # Safety: can't delete current branch
-    if branch_name == current_branch:
-        print(f"{Colors.RED}✗ Cannot delete the currently checked-out branch.{Colors.RESET}")
-        return False
-    
     # Execute local delete (-d first, escalate to -D only if unmerged and user confirmed)
     flag = "-D" if unmerged_count else "-d"
     res = run_git(["branch", flag, branch_name], repo_path)
@@ -322,12 +402,12 @@ def confirm_and_delete_branch(repo_path: Path, branch_name: str, current_branch:
     
     # Delete remote if present
     if has_remote:
-        push_res = run_git(["push", "origin", "--delete", branch_name], repo_path)
+        push_res = run_git(["push", "origin", "--delete", "refs/heads/" + branch_name], repo_path)
         if push_res.returncode == 0:
             print(f"{Colors.GREEN}✓ Deleted remote branch 'origin/{branch_name}'{Colors.RESET}")
         else:
             print(f"{Colors.YELLOW}⚠️  Remote delete failed: {push_res.stderr.strip()}{Colors.RESET}")
-            print(f"{Colors.DIM}   Run manually: git push origin --delete {branch_name}{Colors.RESET}")
+            print(f"{Colors.DIM}   Run manually: git push origin refs/heads/{branch_name}{Colors.RESET}")
     
     return True
 
@@ -337,6 +417,11 @@ def verify_and_offer_delete(repo_path: Path, source: str, target: str):
     Verify if source changes are present in target (via hash comparison)
     and offer to delete the source branch.
     """
+    # Never offer to delete the default branch
+    default_branch = get_default_branch(repo_path)
+    if source == default_branch:
+        print(f"\n{Colors.DIM}ℹ️  '{source}' is the default branch — skipping delete offer.{Colors.RESET}")
+        return
     print(f"\n{Colors.BOLD}🔍 Verifying patch integrity...{Colors.RESET}")
     
     # 1. Identify files changed in source (relative to where it branched from target)
@@ -402,7 +487,11 @@ def verify_and_offer_delete(repo_path: Path, source: str, target: str):
 def rename_branch(repo_path: Path, old_name: str, new_name: str, update_remote: bool = False) -> bool:
     """Rename a branch locally and optionally on remote using atomic operations."""
     current = get_current_branch(repo_path)
-    
+
+    # Detect previous upstream remote before renaming (so we know where to push)
+    old_upstream_status = get_branch_upstream_status(repo_path, old_name)
+    old_remote = old_upstream_status.get('remote') or 'origin'
+
     if current == old_name:
         result = run_git(["branch", "-m", new_name], repo_path)
     else:
@@ -415,24 +504,26 @@ def rename_branch(repo_path: Path, old_name: str, new_name: str, update_remote: 
     print(f"{Colors.GREEN}✓ Renamed local branch '{old_name}' → '{new_name}'{Colors.RESET}")
     
     if update_remote:
-        print(f"\n{Colors.CYAN}Updating remote...{Colors.RESET}")
+        print(f"\n{Colors.CYAN}Updating remote ({old_remote})...{Colors.RESET}")
+        # Push new name with upstream tracking set (-u)
         result = atomic_git_operation(
             repo_path=repo_path,
-            git_command=["push", "origin", new_name],
-            description=f"push renamed branch '{new_name}' to remote"
+            git_command=["push", "-u", old_remote, new_name],
+            description=f"push renamed branch '{new_name}' to {old_remote} with upstream tracking"
         )
         
         if result.returncode != 0:
             print(f"{Colors.YELLOW}⚠ Failed to push new branch to remote{Colors.RESET}")
         else:
-            print(f"{Colors.GREEN}✓ Pushed '{new_name}' to remote{Colors.RESET}")
+            print(f"{Colors.GREEN}✓ Pushed '{new_name}' to {old_remote} and set upstream tracking{Colors.RESET}")
+            # Delete old remote branch name
             result = atomic_git_operation(
                 repo_path=repo_path,
-                git_command=["push", "origin", "--delete", old_name],
+                git_command=["push", old_remote, "--delete", "refs/heads/" + old_name],
                 description=f"delete old remote branch '{old_name}'"
             )
             if result.returncode == 0:
-                print(f"{Colors.GREEN}✓ Deleted '{old_name}' from remote{Colors.RESET}")
+                print(f"{Colors.GREEN}✓ Deleted '{old_name}' from {old_remote}{Colors.RESET}")
             else:
                 print(f"{Colors.YELLOW}⚠ Failed to delete old branch from remote{Colors.RESET}")
     
@@ -463,7 +554,7 @@ def delete_branch(repo_path: Path, branch_name: str, force: bool = False, delete
             print(f"\n{Colors.CYAN}Deleting from remote...{Colors.RESET}")
             push_result = atomic_git_operation(
                 repo_path=repo_path,
-                git_command=["push", "origin", "--delete", branch_name],
+                git_command=["push", "origin", "--delete", "refs/heads/" + branch_name],
                 description=f"delete remote branch 'origin/{branch_name}'"
             )
             
@@ -471,10 +562,10 @@ def delete_branch(repo_path: Path, branch_name: str, force: bool = False, delete
                 print(f"{Colors.GREEN}✓ Deleted remote branch 'origin/{branch_name}'{Colors.RESET}")
             else:
                 print(f"{Colors.YELLOW}⚠️  Failed to delete remote branch: {push_result.stderr.strip()}{Colors.RESET}")
-                print(f"{Colors.DIM}   You can manually delete it with: git push origin --delete {branch_name}{Colors.RESET}")
+                print(f"{Colors.DIM}   You can manually delete it with: git push origin refs/heads/{branch_name}{Colors.RESET}")
         elif remote_exists:
             print(f"{Colors.DIM}ℹ️  Remote branch 'origin/{branch_name}' still exists{Colors.RESET}")
-            print(f"{Colors.DIM}   Delete it with: git push origin --delete {branch_name}{Colors.RESET}")
+            print(f"{Colors.DIM}   Delete it with: git push origin refs/heads/{branch_name}{Colors.RESET}")
         
         return True
     else:
@@ -564,6 +655,161 @@ def get_branch_upstream_status(repo_path: Path, branch: str) -> dict:
 def get_all_branches_upstream_status(repo_path: Path, local_branches: list) -> dict:
     """Return upstream status for all local branches. {branch: status_dict}"""
     return {b: get_branch_upstream_status(repo_path, b) for b in local_branches}
+
+
+def search_github_repos(query: str) -> list:
+    """
+    Search GitHub for repos matching query using the public API (no auth needed for basic search).
+    Returns list of dicts with keys: full_name, description, html_url, clone_url, stargazers_count.
+    """
+    import urllib.request
+    import json
+    url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&per_page=8"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "gitship/1.0", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return data.get("items", [])
+    except Exception:
+        return []
+
+
+def add_upstream_remote(repo_path: Path):
+    """
+    Interactively add a new remote (typically 'upstream' for a forked repo).
+    Supports:
+      - typing a full URL directly
+      - typing just a repo name/owner to search GitHub and pick from results
+    After adding, offers to fetch tags and branches from the new remote.
+    """
+    import urllib.parse
+
+    print(f"\n{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+    print(f"{Colors.BOLD}ADD UPSTREAM REMOTE{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+
+    # Show existing remotes
+    remotes_res = run_git(["remote", "-v"], repo_path)
+    if remotes_res.stdout.strip():
+        print(f"\n{Colors.BOLD}Current remotes:{Colors.RESET}")
+        seen = set()
+        for line in remotes_res.stdout.strip().splitlines():
+            parts = line.split()
+            if parts and parts[0] not in seen:
+                seen.add(parts[0])
+                url_part = parts[1] if len(parts) > 1 else ""
+                print(f"  {Colors.CYAN}{parts[0]}{Colors.RESET}  {Colors.DIM}{url_part}{Colors.RESET}")
+
+    print(f"""
+  You can:
+    • Type a full URL  (e.g. https://github.com/owner/repo.git)
+    • Type a repo name (e.g. filelock  or  tox-dev/filelock)
+      → gitship will search GitHub and let you pick the right one
+""")
+
+    raw = safe_input(f"{Colors.CYAN}URL or repo name to search:{Colors.RESET} ").strip()
+    if not raw:
+        print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+        return
+
+    # Determine if it's a URL or a search query
+    if raw.startswith("http://") or raw.startswith("https://") or raw.startswith("git@"):
+        clone_url = raw
+        # Derive a suggested remote name from the URL
+        suggested_name = raw.rstrip("/").split("/")[-1].removesuffix(".git")
+    else:
+        # Search GitHub
+        print(f"\n{Colors.BRIGHT_BLUE}Searching GitHub for '{raw}'...{Colors.RESET}")
+        results = search_github_repos(raw)
+
+        if not results:
+            print(f"{Colors.YELLOW}No results found. Enter URL directly instead.{Colors.RESET}")
+            clone_url = safe_input(f"{Colors.CYAN}Full clone URL:{Colors.RESET} ").strip()
+            if not clone_url:
+                print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+                return
+            suggested_name = clone_url.rstrip("/").split("/")[-1].removesuffix(".git")
+        else:
+            print(f"\n{Colors.BOLD}GitHub results:{Colors.RESET}")
+            for i, repo in enumerate(results, 1):
+                stars = repo.get("stargazers_count", 0)
+                desc = repo.get("description") or ""
+                desc_short = (desc[:55] + "…") if len(desc) > 55 else desc
+                star_label = f"{Colors.YELLOW}★{stars}{Colors.RESET}" if stars else ""
+                print(f"  {i}. {Colors.CYAN}{repo['full_name']}{Colors.RESET}  {star_label}")
+                if desc_short:
+                    print(f"     {Colors.DIM}{desc_short}{Colors.RESET}")
+
+            sel = safe_input(f"\n{Colors.CYAN}Select number (or 0 to enter URL manually):{Colors.RESET} ").strip()
+
+            if sel == "0":
+                clone_url = safe_input(f"{Colors.CYAN}Full clone URL:{Colors.RESET} ").strip()
+                if not clone_url:
+                    print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+                    return
+                suggested_name = clone_url.rstrip("/").split("/")[-1].removesuffix(".git")
+            elif sel.isdigit() and 1 <= int(sel) <= len(results):
+                chosen = results[int(sel) - 1]
+                clone_url = chosen["clone_url"]
+                # Suggest a remote name: 'upstream' if origin exists, else owner
+                existing_remotes = [r.strip() for r in run_git(["remote"], repo_path).stdout.strip().splitlines()]
+                if "upstream" not in existing_remotes:
+                    suggested_name = "upstream"
+                else:
+                    suggested_name = chosen["full_name"].split("/")[0]
+                print(f"\n{Colors.GREEN}Selected:{Colors.RESET} {chosen['full_name']}")
+                print(f"{Colors.DIM}  {clone_url}{Colors.RESET}")
+
+                # Confirm before continuing
+                confirm = safe_input(f"\n{Colors.YELLOW}Is this the right repo? (y/n):{Colors.RESET} ").strip().lower()
+                if confirm != "y":
+                    print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+                    return
+            else:
+                print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+                return
+
+    # Ask for remote name
+    remote_name = safe_input(f"\n{Colors.CYAN}Remote name (default={suggested_name}):{Colors.RESET} ").strip() or suggested_name
+
+    # Check if name already exists
+    existing_remotes = [r.strip() for r in run_git(["remote"], repo_path).stdout.strip().splitlines()]
+    if remote_name in existing_remotes:
+        print(f"\n{Colors.YELLOW}Remote '{remote_name}' already exists:{Colors.RESET}")
+        existing_url_res = run_git(["remote", "get-url", remote_name], repo_path)
+        print(f"  Current URL: {Colors.DIM}{existing_url_res.stdout.strip()}{Colors.RESET}")
+        overwrite = safe_input(f"{Colors.YELLOW}Replace with new URL? (y/n):{Colors.RESET} ").strip().lower()
+        if overwrite == "y":
+            run_git(["remote", "set-url", remote_name, clone_url], repo_path)
+            print(f"{Colors.GREEN}✓ Updated URL for remote '{remote_name}'{Colors.RESET}")
+        else:
+            print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+            return
+    else:
+        result = run_git(["remote", "add", remote_name, clone_url], repo_path)
+        if result.returncode != 0:
+            print(f"{Colors.RED}✗ Failed to add remote: {result.stderr.strip()}{Colors.RESET}")
+            return
+        print(f"{Colors.GREEN}✓ Added remote '{remote_name}' → {clone_url}{Colors.RESET}")
+
+    # Offer to fetch tags and branches
+    fetch_choice = safe_input(f"\n{Colors.CYAN}Fetch branches & tags from '{remote_name}' now? (y/n):{Colors.RESET} ").strip().lower()
+    if fetch_choice == "y":
+        print(f"\n{Colors.BRIGHT_BLUE}Fetching from {remote_name}...{Colors.RESET}")
+        result = run_git(["fetch", remote_name, "--tags", "--prune"], repo_path)
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ Fetched all branches and tags from '{remote_name}'{Colors.RESET}")
+            # Show what we got
+            tags_res = run_git(["tag", "--list", "--sort=-version:refname"], repo_path)
+            tags = [t.strip() for t in tags_res.stdout.strip().splitlines() if t.strip()]
+            if tags:
+                preview = ", ".join(tags[:8])
+                more = f" (+{len(tags)-8} more)" if len(tags) > 8 else ""
+                print(f"  Tags available: {Colors.DIM}{preview}{more}{Colors.RESET}")
+        else:
+            print(f"{Colors.YELLOW}⚠ Fetch had issues: {result.stderr.strip()}{Colors.RESET}")
+
+    print(f"\n{Colors.DIM}Tip: To pull their changes later: git fetch {remote_name} --tags{Colors.RESET}")
 
 
 def fix_upstream_tracking(repo_path: Path, branch: str, upstream_status: dict):
@@ -1322,29 +1568,34 @@ def merge_branches_interactive(repo_path: Path, source: str, target: str):
         # Save cache immediately so nothing is lost if the process exits
         _save_merge_cache(repo_path, source, target)
 
-        # Restore stash NOW so the resolver works with a clean tree
-        if stashed:
-            restore_latest_stash(repo_path)
-            stashed = False
-
+        # Launch the resolver FIRST — stash stays until after conflicts are fixed
+        # (git refuses to pop a stash onto a tree with conflict markers)
         resolved = False
         try:
             from gitship.resolve import run_conflict_resolver
             print(f"\n{Colors.CYAN}Launching interactive conflict resolver...{Colors.RESET}")
             run_conflict_resolver(repo_path)
-            remaining = run_git(
-                ["diff", "--name-only", "--diff-filter=U"], repo_path
-            ).stdout.strip()
-            if remaining:
-                _save_merge_cache(repo_path, source, target)
-                print(f"{Colors.YELLOW}⚠  {len(remaining.splitlines())} conflict(s) still unresolved.{Colors.RESET}")
-            else:
-                resolved = True  # fall through to commit+message prompt below
         except ImportError:
-            pass
+            # Fall back to subprocess so the user still gets the resolver
+            import subprocess as _sp
+            _sp.run(["gitship", "resolve"], cwd=repo_path)
+
+        remaining = run_git(
+            ["diff", "--name-only", "--diff-filter=U"], repo_path
+        ).stdout.strip()
+        if remaining:
+            _save_merge_cache(repo_path, source, target)
+            print(f"{Colors.YELLOW}⚠  {len(remaining.splitlines())} conflict(s) still unresolved.{Colors.RESET}")
+        else:
+            resolved = True
+
+        # Now restore the stash — conflicts are gone so pop will succeed
+        if stashed:
+            restore_latest_stash(repo_path)
+            stashed = False
 
         if not resolved:
-            print(f"\n{Colors.YELLOW}Run 'gitship merge' when ready to finish resolving.{Colors.RESET}")
+            print(f"\n{Colors.YELLOW}Run 'gitship resolve' when ready to finish resolving.{Colors.RESET}")
             print(f"{Colors.DIM}   Progress is saved — partial resolutions won't be lost.{Colors.RESET}")
             return
 
@@ -1398,7 +1649,16 @@ def merge_branches_interactive(repo_path: Path, source: str, target: str):
 
     # ── Commit ────────────────────────────────────────────────────────────────
     if commit_msg:
-        res_commit = run_git(["commit", "-m", commit_msg], repo_path)
+        # Write message to a temp file and use -F to avoid ARG_MAX limit
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False, encoding="utf-8") as _tf:
+            _tf.write(commit_msg)
+            _tf_path = _tf.name
+        try:
+            res_commit = run_git(["commit", "-F", _tf_path], repo_path)
+        finally:
+            _os.unlink(_tf_path)
     else:
         res_commit = run_git(["commit", "--no-edit"], repo_path)
 
@@ -2363,7 +2623,12 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
     
     # Get all branches
     branches = list_branches(repo_path)
-    local_branches = [b for b in branches['local'] if b != target_branch]
+    current_branch = get_current_branch(repo_path)
+    default_branch = get_default_branch(repo_path)
+
+    # Never include the target, current, or default branch as candidates for deletion
+    protected = {target_branch, current_branch, default_branch} - {None}
+    local_branches = [b for b in branches['local'] if b not in protected]
     
     if not local_branches:
         print(f"{Colors.YELLOW}No branches to analyze{Colors.RESET}")
@@ -2430,6 +2695,10 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             return
         
         for branch, _ in redundant:
+            # Safety: never delete current or default branch
+            if branch in protected:
+                print(f"  {Colors.YELLOW}⚠ Skipped '{branch}' (protected branch){Colors.RESET}")
+                continue
             # Delete local
             delete_result = atomic_git_operation(
                 repo_path=repo_path,
@@ -2445,7 +2714,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                 if remote_check.stdout.strip():
                     remote_result = atomic_git_operation(
                         repo_path=repo_path,
-                        git_command=["push", "origin", "--delete", branch],
+                        git_command=["push", "origin", "--delete", "refs/heads/" + branch],
                         description=f"delete remote branch 'origin/{branch}'"
                     )
                     if remote_result.returncode == 0:
@@ -2545,7 +2814,10 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                         
                         delete_choice = safe_input(f"\n{Colors.CYAN}Delete '{branch}' (local + remote)? (y/n):{Colors.RESET} ").strip().lower()
                         if delete_choice == 'y':
-                            delete_branch(repo_path, branch, force=True, delete_remote=True)
+                            if branch in protected:
+                                print(f"  {Colors.YELLOW}⚠ Cannot delete '{branch}' — it is a protected branch.{Colors.RESET}")
+                            else:
+                                delete_branch(repo_path, branch, force=True, delete_remote=True)
                     else:
                         # Check if it's an empty patch (already applied)
                         err_msg = cherry_result.stderr + cherry_result.stdout
@@ -2565,9 +2837,12 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                             
                             # Branch is redundant, offer to delete
                             print(f"\n{Colors.YELLOW}💡 Branch '{branch}' appears redundant (changes already in '{target_branch}'){Colors.RESET}")
-                            delete_choice = safe_input(f"Delete '{branch}' (local + remote)? (y/n): ").strip().lower()
-                            if delete_choice == 'y':
-                                delete_branch(repo_path, branch, force=True, delete_remote=True)
+                            if branch in protected:
+                                print(f"  {Colors.DIM}(Skipping delete offer — '{branch}' is a protected branch){Colors.RESET}")
+                            else:
+                                delete_choice = safe_input(f"Delete '{branch}' (local + remote)? (y/n): ").strip().lower()
+                                if delete_choice == 'y':
+                                    delete_branch(repo_path, branch, force=True, delete_remote=True)
                         else:
                             # Real conflict
                             print(f"{Colors.RED}✗ Cherry-pick failed: {cherry_result.stderr}{Colors.RESET}")
@@ -2583,9 +2858,12 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
             
             elif action == "3":
                 # Delete branch
-                delete_choice = safe_input(f"\n{Colors.YELLOW}Delete '{branch}' (local + remote)? (yes/no):{Colors.RESET} ").strip().lower()
-                if delete_choice == "yes":
-                    delete_branch(repo_path, branch, force=True, delete_remote=True)
+                if branch in protected:
+                    print(f"  {Colors.YELLOW}⚠ Cannot delete '{branch}' — it is a protected branch (current or default).{Colors.RESET}")
+                else:
+                    delete_choice = safe_input(f"\n{Colors.YELLOW}Delete '{branch}' (local + remote)? (yes/no):{Colors.RESET} ").strip().lower()
+                    if delete_choice == "yes":
+                        delete_branch(repo_path, branch, force=True, delete_remote=True)
             
             elif action == "0":
                 break
@@ -2620,7 +2898,7 @@ def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
                 for branch in deleted:
                     result = atomic_git_operation(
                         repo_path=repo_path,
-                        git_command=["push", "origin", "--delete", branch],
+                        git_command=["push", "origin", "--delete", "refs/heads/" + branch],
                         description=f"delete remote branch 'origin/{branch}'"
                     )
                     if result.returncode == 0:
@@ -2778,11 +3056,12 @@ def _show_branch_menu_inner(repo_path: Path):
         print("  8. Compare & Merge branches (Simple)")
         print("  9. Cleanup redundant branches")
         print(f"  {Colors.YELLOW}A. Fix upstream tracking{Colors.RESET}  (set/unset/repair branch → remote tracking)")
+        print(f"  {Colors.CYAN}R. Manage remotes{Colors.RESET}  (add/view/remove remotes, fetch upstream fork)")
         print(f"  {Colors.YELLOW}S. Stash manager{Colors.RESET}  (list/apply/restore stashed changes)")
         print("  0. Exit")
         
         try:
-            choice = safe_input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9, A):{Colors.RESET} ").strip().upper()
+            choice = safe_input(f"\n{Colors.BRIGHT_BLUE}Choose option (0-9, A, R, S):{Colors.RESET} ").strip().upper()
         except (KeyboardInterrupt, EOFError, UserCancelled):
             print(f"\n\n{Colors.YELLOW}Cancelled{Colors.RESET}")
             break
@@ -2868,17 +3147,25 @@ def _show_branch_menu_inner(repo_path: Path):
         elif choice == "5":
             # Delete branch
             print(f"\n{Colors.BOLD}Select branch to delete:{Colors.RESET}")
-            deletable = [b for b in branches['local'] if b != current]
-            
+            # Show ALL local branches — current branch is included but marked
+            # confirm_and_delete_branch will offer a switch-away flow if needed
+            deletable = branches['local']
+
             if not deletable:
-                print(f"{Colors.YELLOW}No other branches to delete{Colors.RESET}")
+                print(f"{Colors.YELLOW}No branches to delete{Colors.RESET}")
                 continue
-            
+
             for i, branch in enumerate(deletable, 1):
-                print(f"  {i}. {branch}")
-            
+                current_marker = f" {Colors.BRIGHT_GREEN}(current){Colors.RESET}" if branch == current else ""
+                default_marker = f" {Colors.BRIGHT_CYAN}(default){Colors.RESET}" if branch == default else ""
+                print(f"  {i}. {branch}{current_marker}{default_marker}")
+
             selection = safe_input(f"\n{Colors.CYAN}Enter number or branch name:{Colors.RESET} ").strip()
-            
+
+            if not selection:
+                print(f"{Colors.DIM}Cancelled.{Colors.RESET}")
+                continue
+
             branch_name = None
             if selection.isdigit():
                 idx = int(selection) - 1
@@ -2888,12 +3175,11 @@ def _show_branch_menu_inner(repo_path: Path):
                     print(f"{Colors.RED}Invalid selection{Colors.RESET}")
                     continue
             else:
+                if selection not in deletable:
+                    print(f"{Colors.RED}Branch '{selection}' not found{Colors.RESET}")
+                    continue
                 branch_name = selection
-            
-            if branch_name == current:
-                print(f"{Colors.RED}Cannot delete current branch{Colors.RESET}")
-                continue
-            
+
             confirm_and_delete_branch(repo_path, branch_name, current)
         
         elif choice == "6":
@@ -2922,6 +3208,7 @@ def _show_branch_menu_inner(repo_path: Path):
             print("  5. Prune stale remote branches")
             print("  6. Sync deletions to remote (delete remote branches deleted locally)")
             print("  7. Push local branch to remote")
+            print(f"  {Colors.CYAN}8. Add upstream remote{Colors.RESET}  (track original/forked repo, fetch their tags)")
             
             remote_choice = safe_input(f"\n{Colors.CYAN}Choose option:{Colors.RESET} ").strip()
             
@@ -3093,7 +3380,7 @@ def _show_branch_menu_inner(repo_path: Path):
                     if confirm == 'y':
                         result = atomic_git_operation(
                             repo_path=repo_path,
-                            git_command=["push", "origin", "--delete", branch_to_delete],
+                            git_command=["push", "origin", "--delete", "refs/heads/" + branch_to_delete],
                             description=f"delete remote branch 'origin/{branch_to_delete}'"
                         )
                         if result.returncode == 0:
@@ -3156,7 +3443,7 @@ def _show_branch_menu_inner(repo_path: Path):
                         for branch_name in deleted:
                             result = atomic_git_operation(
                                 repo_path=repo_path,
-                                git_command=["push", "origin", "--delete", branch_name],
+                                git_command=["push", "origin", "--delete", "refs/heads/" + branch_name],
                                 description=f"delete remote branch 'origin/{branch_name}'"
                             )
                             
@@ -3259,6 +3546,9 @@ def _show_branch_menu_inner(repo_path: Path):
                         branches = list_branches(repo_path)
                     else:
                         print(f"{Colors.RED}✗ Failed: {result.stderr.strip()}{Colors.RESET}")
+            
+            elif remote_choice == "8":
+                add_upstream_remote(repo_path)
         
         elif choice == "A":
             # Fix upstream tracking
@@ -3289,6 +3579,130 @@ def _show_branch_menu_inner(repo_path: Path):
                 fix_upstream_tracking(repo_path, branch_to_fix, upstream_statuses.get(branch_to_fix, {'upstream': None, 'upstream_gone': False}))
             else:
                 print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+
+        elif choice == "R":
+            # Manage remotes
+            while True:
+                print(f"\n{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+                print(f"{Colors.BOLD}MANAGE REMOTES{Colors.RESET}")
+                print(f"{Colors.BOLD}{'=' * 60}{Colors.RESET}")
+
+                # List current remotes with URLs
+                remotes_res = run_git(["remote", "-v"], repo_path)
+                remotes_raw = {}
+                for line in remotes_res.stdout.strip().splitlines():
+                    parts = line.split()
+                    if parts and parts[0] not in remotes_raw:
+                        remotes_raw[parts[0]] = parts[1] if len(parts) > 1 else ""
+
+                if remotes_raw:
+                    print(f"\n{Colors.BOLD}Current remotes:{Colors.RESET}")
+                    for rname, rurl in remotes_raw.items():
+                        print(f"  {Colors.CYAN}{rname}{Colors.RESET}  {Colors.DIM}{rurl}{Colors.RESET}")
+                else:
+                    print(f"\n  {Colors.YELLOW}No remotes configured{Colors.RESET}")
+
+                print(f"\n  1. Add remote  (add fork/upstream/mirror, search GitHub by name)")
+                print(f"  2. Remove remote")
+                print(f"  3. Rename remote")
+                print(f"  4. Fetch from remote  (update refs + tags)")
+                print(f"  0. Back")
+
+                r_choice = safe_input(f"\n{Colors.CYAN}Choose:{Colors.RESET} ").strip()
+
+                if r_choice == "0" or not r_choice:
+                    break
+
+                elif r_choice == "1":
+                    add_upstream_remote(repo_path)
+
+                elif r_choice == "2":
+                    if not remotes_raw:
+                        print(f"{Colors.YELLOW}No remotes to remove{Colors.RESET}")
+                        continue
+                    remote_list = list(remotes_raw.keys())
+                    for i, r in enumerate(remote_list, 1):
+                        print(f"  {i}. {r}  {Colors.DIM}{remotes_raw[r]}{Colors.RESET}")
+                    sel = safe_input(f"\n{Colors.CYAN}Select remote to remove:{Colors.RESET} ").strip()
+                    target_remote = None
+                    if sel.isdigit():
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(remote_list):
+                            target_remote = remote_list[idx]
+                    elif sel in remotes_raw:
+                        target_remote = sel
+                    if target_remote:
+                        confirm = safe_input(f"{Colors.YELLOW}Remove remote '{target_remote}'? (y/n):{Colors.RESET} ").strip().lower()
+                        if confirm == 'y':
+                            res = run_git(["remote", "remove", target_remote], repo_path)
+                            if res.returncode == 0:
+                                print(f"{Colors.GREEN}✓ Removed remote '{target_remote}'{Colors.RESET}")
+                            else:
+                                print(f"{Colors.RED}✗ Failed: {res.stderr.strip()}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+
+                elif r_choice == "3":
+                    if not remotes_raw:
+                        print(f"{Colors.YELLOW}No remotes to rename{Colors.RESET}")
+                        continue
+                    remote_list = list(remotes_raw.keys())
+                    for i, r in enumerate(remote_list, 1):
+                        print(f"  {i}. {r}")
+                    sel = safe_input(f"\n{Colors.CYAN}Select remote to rename:{Colors.RESET} ").strip()
+                    target_remote = None
+                    if sel.isdigit():
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(remote_list):
+                            target_remote = remote_list[idx]
+                    elif sel in remotes_raw:
+                        target_remote = sel
+                    if target_remote:
+                        new_name = safe_input(f"{Colors.CYAN}New name for '{target_remote}':{Colors.RESET} ").strip()
+                        if new_name:
+                            res = run_git(["remote", "rename", target_remote, new_name], repo_path)
+                            if res.returncode == 0:
+                                print(f"{Colors.GREEN}✓ Renamed '{target_remote}' → '{new_name}'{Colors.RESET}")
+                            else:
+                                print(f"{Colors.RED}✗ Failed: {res.stderr.strip()}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+
+                elif r_choice == "4":
+                    if not remotes_raw:
+                        print(f"{Colors.YELLOW}No remotes to fetch from{Colors.RESET}")
+                        continue
+                    remote_list = list(remotes_raw.keys())
+                    for i, r in enumerate(remote_list, 1):
+                        print(f"  {i}. {r}")
+                    sel = safe_input(f"\n{Colors.CYAN}Select remote to fetch (Enter for all):{Colors.RESET} ").strip()
+                    if not sel:
+                        print(f"\n{Colors.BRIGHT_BLUE}Fetching from all remotes...{Colors.RESET}")
+                        res = run_git(["fetch", "--all", "--tags", "--prune"], repo_path)
+                    else:
+                        target_remote = None
+                        if sel.isdigit():
+                            idx = int(sel) - 1
+                            if 0 <= idx < len(remote_list):
+                                target_remote = remote_list[idx]
+                        elif sel in remotes_raw:
+                            target_remote = sel
+                        if not target_remote:
+                            print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+                            continue
+                        print(f"\n{Colors.BRIGHT_BLUE}Fetching from '{target_remote}'...{Colors.RESET}")
+                        res = run_git(["fetch", target_remote, "--tags", "--prune"], repo_path)
+                    if res.returncode == 0:
+                        print(f"{Colors.GREEN}✓ Fetch complete{Colors.RESET}")
+                        # Show tag preview
+                        tags_res = run_git(["tag", "--list", "--sort=-version:refname"], repo_path)
+                        tags = [t.strip() for t in tags_res.stdout.strip().splitlines() if t.strip()]
+                        if tags:
+                            preview = ", ".join(tags[:6])
+                            more = f" (+{len(tags)-6} more)" if len(tags) > 6 else ""
+                            print(f"  {Colors.DIM}Tags: {preview}{more}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}✗ Fetch failed: {res.stderr.strip()}{Colors.RESET}")
 
         elif choice == "S":
             try:

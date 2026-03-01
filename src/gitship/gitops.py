@@ -118,9 +118,14 @@ def _get_matched_files(repo_path: Path, patterns: List[str]) -> List[str]:
     for line in result.stdout.strip().split('\n'):
         if not line:
             continue
+        status = line[:2]
+        if status == '??':  # skip untracked — git stash can't handle them as pathspecs
+            continue
         parts = line.split(None, 1)
         if len(parts) == 2:
             filepath = parts[1].strip()
+            if ' -> ' in filepath:  # renamed: "old -> new"
+                filepath = filepath.split(' -> ')[-1].strip()
             for pattern in patterns:
                 if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(Path(filepath).name, pattern):
                     matched.append(filepath)
@@ -205,15 +210,9 @@ def atomic_git_operation(
             if len(matched_files) > 5:
                 file_summary += f" (+{len(matched_files) - 5} more)"
             stash_message = f"Auto-stash [{description}]: {file_summary}"
-        # Create pathspecs for git stash push
-        # This only stashes matching files, not everything
-        stash_cmd = ["stash", "push", "-m", stash_message]
-        
-        # Add -- separator and patterns
-        stash_cmd.append("--")
-        for pattern in ignore_patterns:
-            stash_cmd.append(pattern)
-        
+        # Use resolved file paths not glob patterns — git stash push
+        # treats pathspecs as literals, not globs.
+        stash_cmd = ["stash", "push", "-m", stash_message, "--"] + matched_files
         stash_result = run_git(stash_cmd, cwd=repo_path, check=False)
         
         if stash_result.returncode == 0:
@@ -427,8 +426,8 @@ def atomic_commit_with_snapshot(
     
     if needs_stash:
         print("\n🔒 Stashing AI-modified translations to restore reviewed state...")
-        stash_cmd = ["stash", "push", "-m", stash_message, "--"]
-        stash_cmd.extend(ignore_patterns)
+        _files_to_stash = _get_matched_files(repo_path, ignore_patterns)
+        stash_cmd = ["stash", "push", "-m", stash_message, "--"] + _files_to_stash
         stash_result = run_git(stash_cmd, cwd=repo_path, check=False)
         
         if stash_result.returncode == 0:
@@ -586,8 +585,7 @@ def stash_ignored_changes(repo_path: Path, description: str, patterns: Optional[
     else:
         stash_label = f"Manual stash: {description}"
     
-    stash_cmd = ["stash", "push", "-m", stash_label, "--"]
-    stash_cmd.extend(patterns)
+    stash_cmd = ["stash", "push", "-m", stash_label, "--"] + matched_files
     
     result = run_git(stash_cmd, cwd=repo_path, check=False)
     
@@ -629,10 +627,11 @@ def restore_latest_stash(repo_path: Path, stash_name: Optional[str] = None) -> b
         print("✓ Stash restored")
         return True
     else:
-        if "conflict" in result.stderr.lower():
-            print("⚠️  Stash had conflicts. Resolve conflicts and drop stash manually.")
+        detail = (result.stderr.strip() or result.stdout.strip()) or "no details from git"
+        if "conflict" in detail.lower():
+            print(f"⚠️  Stash had conflicts — resolve manually, then: git stash drop")
         else:
-            print(f"⚠️  Stash restore failed: {result.stderr}")
+            print(f"⚠️  Stash restore failed: {detail}")
         return False
 
 
