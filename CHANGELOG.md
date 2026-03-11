@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-03-11
+
+d
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/branch.py (534 lines changed)
+- UPDATE: src/gitship/cli.py (39 lines changed)
+- UPDATE: src/gitship/config.py (22 lines changed)
+- UPDATE: src/gitship/gitops.py (31 lines changed)
+- UPDATE: src/gitship/pypi.py (76 lines changed)
+- UPDATE: src/gitship/release.py (86 lines changed)
+- NEW: src/gitship/repair.py (283 lines changed)
+- UPDATE: src/gitship/resolve_conflicts.py (173 lines changed)
+
+**Additional Changes:**
+- UX - release notes editor moved example to new line
+- feat: smart maturin crate detection with config persistence + auto-cancel running workflows
+- feat: add repair command, remote management, and smarter conflict resolution
+
+_8 files changed, 1110 insertions(+), 134 deletions(-)_
+
 ## [0.6.0] — 2026-02-25
 
 Documentation Platform & Release Workflow Optimization
