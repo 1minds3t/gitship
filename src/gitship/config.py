@@ -264,3 +264,23 @@ def show_config():
     print("  gitship config --set-tag-suffix \"\"  # clear suffix (main-style)")
     print(f"  Or edit: {get_config_file()}")
     print()
+
+def get_project_publish_crate(project_path: Path = None) -> str | None:
+    """Return the configured publish crate name for this project, or None if not set."""
+    config = load_config()
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    return config.get("project_publish_crate", {}).get(project_key)
+
+
+def set_project_publish_crate(crate_name: str, project_path: Path = None):
+    """Store the user-selected publish crate for this project."""
+    config = load_config()
+    if project_path is None:
+        project_path = Path.cwd()
+    project_key = str(project_path.resolve())
+    if "project_publish_crate" not in config:
+        config["project_publish_crate"] = {}
+    config["project_publish_crate"][project_key] = crate_name
+    save_config(config)

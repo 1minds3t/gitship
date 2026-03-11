@@ -451,37 +451,38 @@ def check_pypi_version_exists(package_name: str, version: str) -> bool:
         return False
 
 
-def check_workflow_running(repo_path: Path, tag: str) -> tuple[bool, str]:
+def check_workflow_running(repo_path: Path, tag: str) -> tuple[bool, str, str]:
     """
     Check if the publish workflow is currently running or queued for this tag.
-    Returns (is_running, human_readable_status).
+    Returns (is_running, human_readable_status, run_id).
     """
     if not shutil.which("gh"):
-        return False, "gh not available"
+        return False, "gh not available", ""
     try:
         import json
         res = subprocess.run(
             ["gh", "run", "list", "--workflow=publish.yml",
-             "--json", "status,conclusion,headBranch,displayTitle,url",
+             "--json", "databaseId,status,conclusion,headBranch,displayTitle,url",
              "--limit", "10"],
             cwd=repo_path, capture_output=True, text=True
         )
         if res.returncode != 0:
-            return False, "could not query runs"
+            return False, "could not query runs", ""
         for run in json.loads(res.stdout or "[]"):
             status     = run.get("status", "")
             conclusion = run.get("conclusion", "")
             title      = run.get("displayTitle", "")
             branch     = run.get("headBranch", "")
             url        = run.get("url", "")
+            run_id     = str(run.get("databaseId", ""))
             if tag in title or tag in branch:
                 if status in ("queued", "in_progress", "waiting", "requested"):
-                    return True, f"{status} — {url}"
+                    return True, f"{status} — {url}", run_id
                 if status == "completed":
-                    return False, f"completed ({conclusion}) — {url}"
-        return False, "no matching run found"
+                    return False, f"completed ({conclusion}) — {url}", run_id
+        return False, "no matching run found", ""
     except Exception as e:
-        return False, f"error: {e}"
+        return False, f"error: {e}", ""
 
 
 def get_gh_release_info(repo_path: Path, tag: str) -> dict:
@@ -2333,7 +2334,7 @@ def _main_logic(repo_path: Path):
         gh_release    = get_gh_release_info(repo_path, _git_tag_1_5)
         tag_on_remote = check_remote_tag(repo_path, _git_tag_1_5)
         on_pypi       = check_pypi_version_exists(_pkg_name, last_tag_full) if _pkg_name else False
-        wf_running, wf_status = check_workflow_running(repo_path, _git_tag_1_5)
+        wf_running, wf_status, wf_run_id = check_workflow_running(repo_path, _git_tag_1_5)
 
         # ── Push local tag that never made it to remote ───────────────────────
         if not tag_on_remote:
@@ -2421,14 +2422,40 @@ def _main_logic(repo_path: Path):
             if wf_running:
                 print(f"\n⚙️  PUBLISH WORKFLOW IS STILL RUNNING for {last_tag_full}")
                 print(f"   Status: {wf_status}")
-                print(f"   Wait for it to finish before taking action.")
-                print(f"\n  1. Check again (refresh)")
-                print(f"  2. Proceed anyway (dangerous — may double-publish)")
-                print(f"  3. EXIT")
-                c = input("\nChoice (1-3): ").strip()
+                print(f"\n  1. Cancel workflow + proceed (recommended)")
+                print(f"  2. Check again (refresh)")
+                print(f"  3. Proceed anyway (dangerous — may double-publish)")
+                print(f"  4. EXIT")
+                c = input("\nChoice (1-4): ").strip()
                 if c == '1':
+                    # Cancel the running workflow then verify it stopped
+                    print(f"  Cancelling running workflow...")
+                    try:
+                        run_id = wf_run_id
+                        cancel_result = subprocess.run(
+                            ["gh", "api", "--method", "POST",
+                             f"repos/{get_repo_url(repo_path).replace('https://github.com/', '')}/actions/runs/{run_id}/cancel"],
+                            cwd=repo_path, check=False, capture_output=True, text=True
+                        )
+                        if cancel_result.returncode == 0:
+                            print(f"  ✓ Cancel requested — waiting for workflow to stop...")
+                            import time as _time
+                            for _ in range(12):  # wait up to 60s
+                                _time.sleep(5)
+                                still_running, _, _wf_id = check_workflow_running(repo_path, _git_tag_1_5)
+                                if not still_running:
+                                    print(f"  ✓ Workflow stopped")
+                                    break
+                            else:
+                                print(f"  ⚠️  Workflow may still be stopping, proceeding anyway")
+                        else:
+                            print(f"  ⚠️  Cancel request failed: {cancel_result.stderr.strip()}")
+                    except Exception as e:
+                        print(f"  ⚠️  Could not cancel: {e}")
+                    wf_running = False
+                elif c == '2':
                     return _main_logic(repo_path)
-                elif c != '2':
+                elif c != '3':
                     return
 
             # Safe to act: full release exists, workflow done/absent, not on PyPI

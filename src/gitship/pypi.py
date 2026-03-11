@@ -63,9 +63,81 @@ def run_command(args: list, cwd: Path = None, capture_output: bool = True) -> su
 
 
 def read_package_name(repo_path: Path) -> Optional[str]:
-    """Read package name from pyproject.toml using proper TOML parser."""
+    """Read package name from pyproject.toml.
+
+    For maturin/workspace repos the root pyproject.toml may belong to the
+    upstream project (e.g. astral-sh/uv). Search for the pyproject.toml that
+    has [tool.maturin] first — that is the actual package being published.
+    """
+    if tomllib is not None:
+        # Check config for a previously saved choice first
+        try:
+            from . import config as _cfg
+            saved = _cfg.get_project_publish_crate(repo_path)
+            if saved:
+                return saved
+        except Exception:
+            pass
+
+        # Scan for all pyproject.toml files with [tool.maturin]
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        maturin_hits = []  # list of (rel_path_str, package_name)
+        for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
+            rel = candidate.relative_to(repo_path)
+            parts = rel.parts
+            if len(parts) > 5:
+                continue
+            if any(p.startswith('.') or p in SKIP_DIRS for p in parts):
+                continue
+            try:
+                with open(candidate, 'rb') as f:
+                    data = tomllib.load(f)
+                is_maturin = (
+                    ('tool' in data and 'maturin' in data.get('tool', {}))
+                    or data.get('build-system', {}).get('build-backend', '') == 'maturin'
+                )
+                if is_maturin:
+                    name = data.get('project', {}).get('name')
+                    if not name:
+                        # Fall back to directory name (e.g. crates/uv-ffi -> uv-ffi)
+                        name = candidate.parent.name
+                    if name:
+                        maturin_hits.append((str(rel.parent), name))
+            except Exception:
+                continue
+
+        if len(maturin_hits) == 1:
+            return maturin_hits[0][1]
+
+        if len(maturin_hits) > 1:
+            print(f"\n⚠️  Multiple maturin crates found in this repo:")
+            for i, (path, name) in enumerate(maturin_hits, 1):
+                print(f"  [{i}] {name}  ({path})")
+            print(f"  [0] None of these — enter manually")
+            try:
+                choice = input("\nWhich package are you publishing? ").strip()
+                if choice.isdigit():
+                    idx = int(choice)
+                    if 1 <= idx <= len(maturin_hits):
+                        chosen = maturin_hits[idx - 1][1]
+                    else:
+                        chosen = input("Package name: ").strip()
+                else:
+                    chosen = choice if choice else None
+                if chosen:
+                    try:
+                        from . import config as _cfg
+                        _cfg.set_project_publish_crate(chosen, repo_path)
+                        print(f"  ✓ Saved '{chosen}' for this project (run 'gitship config' to change)")
+                    except Exception:
+                        pass
+                    return chosen
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+    # Fall back to root pyproject.toml
     pyproject_path = repo_path / "pyproject.toml"
-    
+
     if not pyproject_path.exists():
         return None
     
