@@ -804,24 +804,21 @@ def edit_notes(new_ver: str, draft: str, suggested_title: str, pkg_name: str = "
         
         elif notes_choice == '1':
             # Open editor for custom notes
-            template = f"""# Write your custom release notes here.
-# Lines starting with "# " are comments and will be stripped.
-# Markdown headers (## Heading) are preserved.
-# The auto-generated breakdown will be appended below your notes.
-#
-# Example (all commented out — replace with your own content):
-#
-# ## 🚀 Major Feature Release: The "Atomic Workflow" Engine
-# This release transforms the project into a robust platform.
-#
-# ### 🌟 Key Highlights
-# - **New Engine:** All operations now use a safety layer...
-# - **Interactive Suite:** A new guided conflict resolution workflow...
-#
-# ------------------------------------------------------------------
-# Start writing below this line (delete these comments when done)
-# ------------------------------------------------------------------
+            template = f"""
 
+
+# ------------------------------------------------------------------
+# Write your release notes ABOVE this line. Start typing at line 1.
+# Comments (lines starting with "# ") will be stripped automatically.
+# Markdown headers (## Heading) are preserved.
+# ------------------------------------------------------------------
+#
+# Example:
+# ## 🚀 Major Feature Release
+# Short description of what changed.
+#
+# ### Key Highlights
+# - **Feature:** Details...
 """
             
             editor = os.environ.get('EDITOR', 'nano')
