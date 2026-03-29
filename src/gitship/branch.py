@@ -2139,9 +2139,14 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     print(f"  4. Browse diff by file  (preview each file, max 50 lines)")
     print(f"  5. Swap Source/Target (Review other direction)")
     print(f"  6. Export full report  (commit bodies + full diff → .txt)")
+    if _hm_resume_label:
+        print(f"  7. {Colors.BRIGHT_YELLOW}Hunk-by-hunk merge{Colors.RESET}  (interactive: take/keep/edit/skip per hunk)")
+        print(f"     {_hm_resume_label}")
+    else:
+        print(f"  7. {Colors.BRIGHT_YELLOW}Hunk-by-hunk merge{Colors.RESET}  (interactive: take/keep/edit/skip per hunk)")
     print(f"  0. Back")
-    
-    choice = safe_input(f"\n{Colors.BLUE}Choice (0-6):{Colors.RESET} ").strip()
+
+    choice = safe_input(f"\n{Colors.BLUE}Choice (0-7):{Colors.RESET} ").strip()
     
     if choice == "1":
         merge_branches_interactive(repo_path, source=source, target=target)

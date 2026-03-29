@@ -99,7 +99,8 @@ class ChangeAnalyzer:
             'docs': [],
             'config': [],
             'other': [],
-            'renames': []
+            'renames': [],
+            'submodules': [],
         }
         self.translation_stats = {}
     
@@ -133,7 +134,8 @@ class ChangeAnalyzer:
             'docs': [],
             'config': [],
             'other': [],
-            'renames': []
+            'renames': [],
+            'submodules': [],
         }
         self.translation_stats = {}
         
@@ -506,6 +508,13 @@ class ChangeAnalyzer:
                 safe_path = self._safe_display_path(item['path'])
                 print(f"  {status_icon} {safe_path}")
         
+        # Submodules
+        if self.changes['submodules']:
+            print(f"\n{Colors.BRIGHT_CYAN}📦 Submodules ({len(self.changes['submodules'])} updated):{Colors.RESET}")
+            for item in self.changes['submodules']:
+                status_icon = self._get_status_icon(item['status'])
+                print(f"  {status_icon} {item['path']}  {Colors.DIM}[submodule — new commits]{Colors.RESET}")
+
         # Other
         if self.changes['other']:
             print(f"\n{Colors.DIM}📦 Other ({len(self.changes['other'])} files):{Colors.RESET}")
@@ -788,12 +797,66 @@ def _expand_dir_entry(item: Dict, repo_path: Path) -> List[Dict]:
     return children if children else [item]
 
 
+def _parse_exclude_input(raw: str, max_n: int, flat: List[Dict]) -> set:
+    """Parse exclusion input into a set of 0-based indices.
+
+    Supports:
+      - Individual numbers:  3  7
+      - Ranges:              6-10  (inclusive)
+      - Keyword 't' / 'translations': exclude all .po / .mo / locale files
+      - Keyword 's' / 'submodules':   exclude all submodule entries
+    """
+    excluded = set()
+    for part in raw.split():
+        part_lower = part.lower()
+        # Keyword shortcuts
+        if part_lower in ('t', 'translations'):
+            for i, item in enumerate(flat):
+                p = item.get('path', '')
+                if (p.endswith(('.po', '.pot', '.mo'))
+                        or 'locale' in Path(p).parts):
+                    excluded.add(i)
+            continue
+        if part_lower in ('s', 'submodules'):
+            for i, item in enumerate(flat):
+                if item.get('_is_submodule'):
+                    excluded.add(i)
+            continue
+        # Range  e.g. 6-10
+        if '-' in part:
+            try:
+                lo, hi = part.split('-', 1)
+                lo, hi = int(lo), int(hi)
+                for n in range(lo, hi + 1):
+                    if 1 <= n <= max_n:
+                        excluded.add(n - 1)
+            except ValueError:
+                pass
+            continue
+        # Single number
+        try:
+            n = int(part)
+            if 1 <= n <= max_n:
+                excluded.add(n - 1)
+        except ValueError:
+            pass
+    return excluded
+
+
 def pick_files_to_review(files: List[Dict], repo_path: Path = None) -> List[Dict]:
     """Show a numbered list and let the user exclude files before reviewing.
 
     Directories are expanded inline so individual files inside can be excluded
     independently (e.g. keep review.md, exclude check.md from security/analysis/).
     Returns the filtered list (all files if user skips / presses Enter).
+
+    Exclusion syntax:
+      3          — single number
+      1 4 5      — space-separated numbers
+      6-10       — inclusive range
+      t          — exclude all translation files (.po/.mo/locale)
+      s          — exclude all submodule entries
+    Combine freely, e.g.:  t s 2  or  1-3 7
     """
     if len(files) <= 1:
         return files
@@ -806,11 +869,21 @@ def pick_files_to_review(files: List[Dict], repo_path: Path = None) -> List[Dict
     else:
         flat = list(files)
 
+    # Detect which shortcut hints are relevant so we only show them when useful
+    has_translations = any(
+        item.get('path', '').endswith(('.po', '.pot', '.mo'))
+        or 'locale' in Path(item.get('path', '')).parts
+        for item in flat
+    )
+    has_submodules = any(item.get('_is_submodule') for item in flat)
+
     print()
     print("  Files included in this review:")
     for i, item in enumerate(flat, 1):
         if 'old' in item:
             label = f"{item['old']} → {item['new']}"
+        elif item.get('_is_submodule'):
+            label = f"{item['path']}  {Colors.DIM}[submodule — new commits]{Colors.RESET}"
         elif item.get('_dir_parent'):
             label = f"  ↳ {item['path']}  {Colors.DIM}(in {item['_dir_parent']}/){Colors.RESET}"
         else:
@@ -818,7 +891,12 @@ def pick_files_to_review(files: List[Dict], repo_path: Path = None) -> List[Dict
         print(f"    {i:2}. {label}")
 
     print()
-    print("  Enter numbers to EXCLUDE (e.g. 3  or  1 4 5), or press Enter to include all:")
+    hints = ["3", "1 4 5", "6-10"]
+    if has_translations:
+        hints.append("t (all translations)")
+    if has_submodules:
+        hints.append("s (all submodules)")
+    print(f"  Enter numbers/ranges to EXCLUDE (e.g. {', '.join(hints)}), or press Enter to include all:")
     try:
         raw = input("  Exclude: ").strip()
     except KeyboardInterrupt:
@@ -827,14 +905,7 @@ def pick_files_to_review(files: List[Dict], repo_path: Path = None) -> List[Dict
     if not raw:
         return flat if repo_path else files
 
-    excluded_idxs = set()
-    for part in raw.split():
-        try:
-            n = int(part)
-            if 1 <= n <= len(flat):
-                excluded_idxs.add(n - 1)
-        except ValueError:
-            pass
+    excluded_idxs = _parse_exclude_input(raw, len(flat), flat)
 
     if not excluded_idxs:
         return flat if repo_path else files
@@ -2358,6 +2429,630 @@ def commit_translations_only(analyzer: ChangeAnalyzer):
     return True
 
 
+def _load_hunk_grouper(repo_path: Path):
+    """Dynamically load hunk_grouper_ast from the gitship installation next to this file."""
+    import importlib.util
+    candidates = [
+        Path(__file__).parent / "hunk_grouper_ast.py",
+        repo_path / ".gitship" / "hunk_grouper_ast.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location("hunk_grouper_ast", candidate)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+def _suggest_commit_type(tag_type: str, symbol: str) -> str:
+    """Derive a conventional-commit prefix from a group's tag type."""
+    mapping = {
+        "exception":   "fix",
+        "ipc":         "refactor",
+        "dependency":  "refactor",
+        "symbol_removed": "refactor",
+        "abstraction": "refactor",
+        "callgraph":   "refactor",
+    }
+    return mapping.get(tag_type, "chore")
+
+
+def _stage_hunk_patch(repo_path: Path, patch_text: str) -> bool:
+    """
+    Write a minimal patch to a temp file and apply it to the index with
+    git apply --cached.  Returns True on success.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".patch", delete=False, encoding="utf-8"
+    ) as tf:
+        temp_path = tf.name
+        tf.write(patch_text)
+    try:
+        result = subprocess.run(
+            ["git", "apply", "--cached", "--unidiff-zero", "--recount", "--whitespace=nowarn", temp_path],
+            cwd=repo_path,
+            capture_output=True,
+        )
+        try:
+            result.stdout = result.stdout.decode("utf-8")
+            result.stderr = result.stderr.decode("utf-8")
+        except Exception:
+            pass
+        if result.returncode != 0:
+            print(f"  {Colors.YELLOW}⚠  git apply failed: {result.stderr.strip()}{Colors.RESET}")
+            return False
+        return True
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _build_group_patch(group_hunks_list) -> str:
+    from collections import defaultdict
+    by_file: dict = defaultdict(list)
+    for h in group_hunks_list:
+        by_file[h.file].append(h)
+    lines = []
+    for filepath, hunks in by_file.items():
+        lines.append(f"diff --git a/{filepath} b/{filepath}")
+        lines.append(f"--- a/{filepath}")
+        lines.append(f"+++ b/{filepath}")
+        for h in hunks:
+            lines.append(h.header)
+            lines.extend(h.raw_lines)
+    return "\n".join(lines) + "\n"
+
+def _remap_hunks(stale_list, fresh_hunks):
+    """Match stale hunks to freshly-parsed ones by (file, header) after a commit."""
+    fresh_by_key = {(h.file, h.header): h for h in fresh_hunks}
+    result = []
+    for h in stale_list:
+        refreshed = fresh_by_key.get((h.file, h.header))
+        if refreshed:
+            result.append(refreshed)
+        # hunk not found = already applied, silently drop it
+    return result
+
+def semantic_commit(analyzer: ChangeAnalyzer) -> bool:
+    """
+    Run hunk_grouper_ast on the current working-tree diff, show the semantic
+    group table, and let the user commit one group at a time.
+
+    Each group becomes its own atomic commit.  Ungrouped hunks are collected
+    and offered at the end as a single catch-all commit.  The result is a
+    clean, bisectable, CI-friendly history instead of one 4000-line blob.
+    """
+    repo_path = analyzer.repo_path
+
+    # ── 1. Load grouper ──────────────────────────────────────────────────────
+    mod = _load_hunk_grouper(repo_path)
+    if mod is None:
+        print(f"\n{Colors.YELLOW}⚠  hunk_grouper_ast.py not found next to commit.py.{Colors.RESET}")
+        print("   Falling back to standard commit.")
+        return interactive_commit(analyzer)
+
+    # ── 2. Get the full working-tree diff against HEAD ────────────────────────
+    result = subprocess.run(
+        ["git", "diff", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+    )
+    try:
+        diff_text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        diff_text = result.stdout.decode("latin-1")
+
+    if not diff_text.strip():
+        print(f"\n{Colors.YELLOW}  No unstaged changes found (everything may already be staged).{Colors.RESET}")
+        print("  Use standard commit (option 9) to commit what's staged.")
+        input("\nPress Enter to continue...")
+        return False
+
+    # ── 3. Parse hunks & build groups ────────────────────────────────────────
+    print(f"\n{Colors.DIM}  Parsing diff and running AST grouper...{Colors.RESET}")
+    try:
+        all_hunks = mod.parse_diff(diff_text)
+    except Exception as e:
+        print(f"{Colors.RED}  Grouper parse error: {e}{Colors.RESET}")
+        return False
+
+    # Synthesize hunks for untracked files — git diff HEAD ignores them entirely
+    _status_res = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo_path, capture_output=True, text=True
+    )
+    _next_id = max((h.id for h in all_hunks), default=0) + 1
+    for _line in _status_res.stdout.splitlines():
+        if not _line.startswith("?? "):
+            continue
+        _fpath = _line[3:].strip()
+        _abs = repo_path / _fpath
+        if not _abs.is_file():
+            continue
+        try:
+            _lines = _abs.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        _hunk = mod.Hunk(
+            id=_next_id,
+            file=_fpath,
+            header=f"@@ -0,0 +1,{len(_lines)} @@ (new file)",
+        )
+        _hunk.added = _lines
+        _hunk.raw_lines = ["+" + l for l in _lines]
+        all_hunks.append(_hunk)
+        _next_id += 1
+
+    if not all_hunks:
+        print(f"  {Colors.YELLOW}No hunks parsed from diff.{Colors.RESET}")
+        input("\nPress Enter to continue...")
+        return False
+
+    try:
+        tag_map = mod.group_hunks(all_hunks, repo_path=repo_path)
+    except Exception as e:
+        print(f"{Colors.RED}  Grouper error: {e}{Colors.RESET}")
+        return False
+
+    # Build groups: {symbol: [hunk, ...]}  sorted cross-file first then by size
+    from collections import defaultdict
+    # Build id→Hunk lookup
+    hunk_by_id = {h.id: h for h in all_hunks}
+
+    # Union-find: merge any two hunks that share at least one tag.
+    # Step 1: build tag -> [hunk_id] index
+    tag_to_hids: dict = defaultdict(list)
+    for hunk_id, tags in tag_map.items():
+        if hunk_by_id.get(hunk_id) is None:
+            continue
+        for tag in tags:
+            tag_to_hids[tag].append(hunk_id)
+
+    # Step 2: union-find
+    parent: dict = {}
+    def _find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent.get(x, x), parent.get(x, x))
+            x = parent.get(x, x)
+        return x
+    def _union(a, b):
+        a, b = _find(a), _find(b)
+        if a != b:
+            parent[b] = a
+
+    for hids in tag_to_hids.values():
+        for hid in hids[1:]:
+            _union(hids[0], hid)
+
+    # Step 3: pick a canonical label (highest-priority tag of the root hunk)
+    root_tags: dict = {}
+    for hunk_id, tags in tag_map.items():
+        if not tags or hunk_by_id.get(hunk_id) is None:
+            continue
+        root = _find(hunk_id)
+        best = sorted(tags, key=lambda t: (0 if t.kind != "callgraph" else 1, t.name))[0]
+        if root not in root_tags:
+            root_tags[root] = best
+        else:
+            current = root_tags[root]
+            challenger = best
+            if (0 if challenger.kind != "callgraph" else 1) < (0 if current.kind != "callgraph" else 1):
+                root_tags[root] = challenger
+
+    # Step 4: build groups keyed by canonical label
+    groups: dict = defaultdict(list)
+    for hunk_id, tags in tag_map.items():
+        if not tags or hunk_by_id.get(hunk_id) is None:
+            continue
+        root = _find(hunk_id)
+        label = root_tags[root]
+        groups[label].append(hunk_by_id[hunk_id])
+
+    # Single-hunk groups add no value — demote them to ungrouped
+    single_hunk_hunks = [hunks[0] for tag, hunks in groups.items() if len(hunks) == 1]
+    groups = {tag: hunks for tag, hunks in groups.items() if len(hunks) > 1}
+    ungrouped = single_hunk_hunks + [hunk_by_id[hid] for hid, tags in tag_map.items()
+                if not tags and hid in hunk_by_id]
+
+    # Sort: cross-file groups first (more than one unique file), then by hunk count desc
+    def _group_sort_key(item):
+        tag, hunks = item
+        files = {h.file for h in hunks}
+        is_cross = len(files) > 1
+        return (0 if is_cross else 1, -len(hunks))
+
+    sorted_groups = sorted(groups.items(), key=_group_sort_key)
+
+    if not sorted_groups and not ungrouped:
+        print(f"  {Colors.YELLOW}Grouper produced no groups.{Colors.RESET}")
+        input("\nPress Enter to continue...")
+        return False
+
+    # ── 4. Display compact summary table ────────────────────────────────────
+    all_files_seen = sorted({h.file for h in all_hunks})
+    print(f"\n  {Colors.DIM}Grouper sees {len(all_hunks)} hunks across {len(all_files_seen)} files:{Colors.RESET}")
+    for _f in all_files_seen:
+        _n = sum(1 for h in all_hunks if h.file == _f)
+        print(f"    {Colors.DIM}{_f}  ({_n} hunk{'s' if _n != 1 else ''}){Colors.RESET}")
+    print()
+    print(f"\n{'═' * 72}")
+    print(f"  SEMANTIC GROUPS  —  {len(sorted_groups)} groups  +  {len(ungrouped)} ungrouped hunks")
+    print(f"{'═' * 72}")
+    print(f"  ★ = cross-file (risk: broken imports/calls if split)")
+    print(f"  ○ = same-file  (shared data contract — review together)")
+    print()
+    print(f"  {'#':>3}  {'★/○':3}  {'symbol':<32}  {'hunks':>5}  files")
+    print(f"  {'─'*3}  {'─'*3}  {'─'*32}  {'─'*5}  {'─'*30}")
+
+    for i, (tag, hunks) in enumerate(sorted_groups, 1):
+        files = sorted({h.file for h in hunks})
+        cross = len(files) > 1
+        marker = f"{Colors.BRIGHT_RED}★{Colors.RESET}" if cross else f"{Colors.DIM}○{Colors.RESET}"
+        symbol = f"[{tag.name}]" if hasattr(tag, 'name') else str(tag)
+        # Truncate symbol to 32 chars
+        symbol_display = symbol[:32]
+        files_display = ", ".join(Path(f).name for f in files[:3])
+        if len(files) > 3:
+            files_display += f" (+{len(files)-3})"
+        print(f"  {i:>3}  {marker}    {symbol_display:<32}  {len(hunks):>5}  {files_display}")
+
+    if ungrouped:
+        files = sorted({h.file for h in ungrouped})
+        files_display = ", ".join(Path(f).name for f in files[:3])
+        if len(files) > 3:
+            files_display += f" (+{len(files)-3})"
+        print(f"  {'—':>3}  {Colors.DIM}○{Colors.RESET}    {'(ungrouped)':<32}  {len(ungrouped):>5}  {files_display}")
+
+    print(f"{'═' * 72}")
+    print()
+    print("  Commit groups one by one. Each becomes its own atomic commit.")
+    print("  Your CI will run on each — a regression pins exactly which group broke.")
+    print()
+
+    # ── 5. Interactive group-by-group commit loop ────────────────────────────
+    committed_count = 0
+    skipped_groups = []
+
+    group_list = list(sorted_groups)  # [(tag, [hunks]), ...]
+
+    i = 0
+    while i < len(group_list):
+        tag, hunks = group_list[i]
+        files = sorted({h.file for h in hunks})
+        cross = len(files) > 1
+        symbol = f"[{tag.name}]" if hasattr(tag, 'name') else str(tag)
+        tag_type = getattr(tag, 'kind', 'refactor')
+
+        print(f"\n{'─' * 72}")
+        marker = "★ CROSS-FILE" if cross else "○ same-file"
+        print(f"  Group {i+1}/{len(group_list)}  {marker}  {Colors.BOLD}{symbol}{Colors.RESET}")
+        print(f"  Tag type : {tag_type}")
+        print(f"  Hunks    : {len(hunks)}")
+        print(f"  Files    : {', '.join(files)}")
+        print()
+        print("  Options:")
+        print("  c  Commit this group now")
+        print("  v  View the hunks (diff preview)")
+        print("  s  Skip (leave for later / manual commit)")
+        print("  q  Quit semantic commit (return to menu)")
+        print()
+
+        try:
+            choice = input("  Choice [c/v/s/q]: ").strip().lower()
+        except KeyboardInterrupt:
+            print("\n\nCancelled.")
+            break
+
+        if choice == 'v':
+            # Show the diff lines for each hunk in this group
+            print()
+            tag_name = tag.name if hasattr(tag, 'name') else str(tag)
+            for h in hunks:
+                h_tags = tag_map.get(h.id, set())
+                tag_summary = ", ".join(f"{t.kind}:{t.name}" for t in sorted(h_tags, key=lambda t: t.kind))
+                print(f"  {Colors.CYAN}── {h.file}  {h.header}{Colors.RESET}")
+                if tag_summary:
+                    print(f"  {Colors.DIM}   tags: {tag_summary}{Colors.RESET}")
+                is_new_file = len(h.removed) == 0 and len(h.added) > 80
+                if is_new_file:
+                    # For new/large files show context around lines matching the tag
+                    added = h.added
+                    match_idxs = [i for i, l in enumerate(added) if tag_name in l]
+                    if match_idxs:
+                        print(f"  {Colors.DIM}  (new file — {len(match_idxs)} matches for [{tag_name}] in {len(added)} lines, showing ±3 context){Colors.RESET}")
+                        shown = set()
+                        for mi in match_idxs[:5]:
+                            for ci in range(max(0, mi-3), min(len(added), mi+4)):
+                                if ci not in shown:
+                                    shown.add(ci)
+                                    prefix = f"  {Colors.GREEN}+{Colors.RESET}" if ci == mi else f"  {Colors.DIM} "
+                                    print(f"{prefix}{added[ci]}{Colors.RESET}")
+                            print()
+                        if len(match_idxs) > 5:
+                            print(f"  {Colors.DIM}  ... ({len(match_idxs)-5} more matches){Colors.RESET}")
+                    else:
+                        print(f"  {Colors.DIM}  (new file, {len(added)} lines — no lines directly match [{tag_name}]){Colors.RESET}")
+                else:
+                    lines = ([f"-{l}" for l in h.removed] +
+                            [f"+{l}" for l in h.added])
+                    for line in lines[:40]:
+                        if line.startswith('+'):
+                            print(f"  {Colors.GREEN}{line}{Colors.RESET}")
+                        elif line.startswith('-'):
+                            print(f"  {Colors.RED}{line}{Colors.RESET}")
+                        else:
+                            print(f"  {line}")
+                    if len(lines) > 40:
+                        print(f"  {Colors.DIM}  ... ({len(lines)-40} more lines){Colors.RESET}")
+                print()
+            continue  # re-show options for same group
+
+        elif choice == 's':
+            skipped_groups.append((tag, hunks))
+            i += 1
+            continue
+
+        elif choice == 'q':
+            print(f"\n  {Colors.YELLOW}Exiting semantic commit.  {committed_count} group(s) committed so far.{Colors.RESET}")
+            if skipped_groups:
+                print(f"  {len(skipped_groups)} group(s) skipped — still in working tree.")
+            input("\nPress Enter to continue...")
+            return committed_count > 0
+
+        elif choice != 'c':
+            continue  # invalid input, re-show
+
+        # ── Commit this group ──────────────────────────────────────────────
+        # Build auto-suggested message from tag info
+        commit_type_prefix = _suggest_commit_type(tag_type, symbol)
+        # Derive a scope from the files touched
+        if cross:
+            scope = ""  # cross-file: no single scope
+        else:
+            # Use the module name without extension
+            scope = Path(files[0]).stem if files else ""
+
+        if scope:
+            suggested_msg = f"{commit_type_prefix}({scope}): {symbol} contract"
+        else:
+            suggested_msg = f"{commit_type_prefix}: {symbol} ({tag_type})"
+
+        print()
+        print(f"  {Colors.BOLD}Commit message{Colors.RESET}")
+        print(f"  Suggested: {Colors.DIM}{suggested_msg}{Colors.RESET}")
+        print("  e  Open editor (multiline)")
+        print("  Enter  Use suggested")
+        print()
+
+        try:
+            custom_msg = input("  Message [Enter/e]: ").strip()
+        except KeyboardInterrupt:
+            print("\n  Skipping this group.")
+            skipped_groups.append((tag, hunks))
+            i += 1
+            continue
+
+        if custom_msg.lower() == 'e':
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+                temp_path = tf.name
+                tf.write(suggested_msg + "\n\n\n")
+                tf.write("# -------------------------------------------------------\n")
+                tf.write("# Edit the commit message above. Lines starting with # are ignored.\n")
+                tf.write("# -------------------------------------------------------\n")
+            editor = os.environ.get('EDITOR', 'nano')
+            if editor == 'nano':
+                if subprocess.run(['which', 'nano'], capture_output=True).returncode != 0:
+                    editor = 'vim'
+            try:
+                subprocess.run([editor, temp_path], check=True)
+                with open(temp_path, 'r') as f:
+                    lines = f.readlines()
+                message_lines = [l.rstrip() for l in lines if not l.strip().startswith('#')]
+                while message_lines and not message_lines[0]:
+                    message_lines.pop(0)
+                while message_lines and not message_lines[-1]:
+                    message_lines.pop()
+                custom_msg = '\n'.join(message_lines) or suggested_msg
+            except Exception as ex:
+                print(f"  {Colors.YELLOW}Editor failed ({ex}), using suggested.{Colors.RESET}")
+                custom_msg = suggested_msg
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        final_msg = custom_msg if custom_msg else suggested_msg
+        final_msg += "\n\n[gitship-semantic]"
+
+        # Build and apply patch to index
+        patch_text = _build_group_patch(hunks)
+        print(f"\n  {Colors.DIM}Staging {len(hunks)} hunks...{Colors.RESET}")
+
+        staged_ok = _stage_hunk_patch(repo_path, patch_text)
+        if not staged_ok:
+            print(f"  {Colors.RED}Could not stage patch — skipping this group.{Colors.RESET}")
+            print("  Tip: if the diff has already been partially applied, try 'git diff HEAD' to check.")
+            skipped_groups.append((tag, hunks))
+            i += 1
+            continue
+
+        # Commit only what's staged
+        if atomic_git_operation:
+            commit_result = atomic_git_operation(
+                repo_path=repo_path,
+                git_command=["commit", "-m", final_msg],
+                description=f"commit group {symbol}",
+            )
+        else:
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", final_msg],
+                cwd=repo_path,
+                capture_output=True,
+            )
+            try:
+                commit_result.stdout = commit_result.stdout.decode("utf-8")
+                commit_result.stderr = commit_result.stderr.decode("utf-8")
+            except Exception:
+                pass
+
+        if commit_result.returncode != 0:
+            print(f"  {Colors.RED}❌ Commit failed: {commit_result.stderr.strip()}{Colors.RESET}")
+            # Unstage what we staged
+            subprocess.run(["git", "reset", "HEAD"], cwd=repo_path, capture_output=True)
+            skipped_groups.append((tag, hunks))
+            i += 1
+            continue
+
+        committed_count += 1
+        print(f"\n  {Colors.GREEN}✅ Committed: {final_msg.splitlines()[0]}{Colors.RESET}")
+        if commit_result.stdout.strip():
+            print(f"  {Colors.DIM}{commit_result.stdout.strip()}{Colors.RESET}")
+
+        # Re-parse diff against new HEAD so remaining hunk headers are current
+        _fresh_result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=repo_path, capture_output=True,
+        )
+        try:
+            _fresh_text = _fresh_result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            _fresh_text = _fresh_result.stdout.decode("latin-1")
+        _fresh_hunks = mod.parse_diff(_fresh_text)
+
+        # Remap all upcoming groups and the ungrouped catch-all
+        for j in range(i + 1, len(sorted_groups)):
+            tag_j, hunks_j = sorted_groups[j]
+            sorted_groups[j] = (tag_j, _remap_hunks(hunks_j, _fresh_hunks))
+        ungrouped = _remap_hunks(ungrouped, _fresh_hunks)
+
+        # Offer push after each commit so CI triggers immediately
+        print()
+        print(f"  {Colors.CYAN}Push now? (triggers CI on this group alone){Colors.RESET}")
+        print("  y  Push immediately  →  CI runs, you'll know if this group is safe")
+        print("  n  Batch push later  →  faster, but CI runs on all groups at once")
+        print()
+        try:
+            push_choice = input("  Push? [y/n]: ").strip().lower()
+        except KeyboardInterrupt:
+            push_choice = 'n'
+
+        if push_choice == 'y':
+            print(f"  {Colors.DIM}Pulling (rebase) then pushing...{Colors.RESET}")
+            _status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_path, capture_output=True, text=True,
+            )
+            _dirty_others = []
+            for _line in _status.stdout.splitlines():
+                if not _line:
+                    continue
+                _parts = _line.split(None, 1)
+                if len(_parts) == 2:
+                    _fp = _parts[1].strip()
+                    if ' -> ' in _fp:
+                        _fp = _fp.split(' -> ')[-1].strip()
+                    if not _line.startswith('??'):  # skip untracked — already handled
+                        _dirty_others.append(Path(_fp).name)
+
+            pull_res = atomic_git_operation(
+                repo_path=repo_path,
+                git_command=["pull", "--rebase"],
+                description="pull --rebase",
+                ignore_patterns=_dirty_others if _dirty_others else None,
+                verbose=True,
+            )
+
+            if pull_res.returncode == 0:
+                push_res = atomic_git_operation(
+                    repo_path=repo_path,
+                    git_command=["push"],
+                    description="push",
+                    ignore_patterns=_dirty_others if _dirty_others else None,
+                    verbose=True,
+                )
+                if push_res.returncode == 0:
+                    print(f"  {Colors.GREEN}✓ Pushed. CI is now running on {symbol}.{Colors.RESET}")
+                    print(f"  {Colors.DIM}  If CI fails, revert with: git revert HEAD{Colors.RESET}")
+                else:
+                    print(f"  {Colors.YELLOW}⚠  Push failed: {push_res.stderr.strip()}{Colors.RESET}")
+            else:
+                print(f"  {Colors.YELLOW}⚠  Pull failed — push skipped. Run manually: git push{Colors.RESET}")
+        i += 1
+    # ── 6. Offer ungrouped hunks as a final catch-all commit ─────────────────
+    if ungrouped:
+        print(f"\n{'─' * 72}")
+        print(f"  {Colors.DIM}Ungrouped hunks: {len(ungrouped)} (no semantic relationship detected){Colors.RESET}")
+        files = sorted({h.file for h in ungrouped})
+        print(f"  Files: {', '.join(files)}")
+        print()
+        print("  c  Commit all ungrouped hunks together")
+        print("  s  Skip (leave unstaged)")
+        print()
+
+        try:
+            choice = input("  Choice [c/s]: ").strip().lower()
+        except KeyboardInterrupt:
+            choice = 's'
+
+        if choice == 'c':
+            patch_text = _build_group_patch(ungrouped)
+            staged_ok = _stage_hunk_patch(repo_path, patch_text)
+            if staged_ok:
+                ug_msg = "chore: miscellaneous ungrouped changes\n\n[gitship-semantic]"
+                try:
+                    custom_ug = input("  Message (Enter for default): ").strip()
+                    if custom_ug:
+                        ug_msg = custom_ug + "\n\n[gitship-semantic]"
+                except KeyboardInterrupt:
+                    pass
+
+                if atomic_git_operation:
+                    res = atomic_git_operation(
+                        repo_path=repo_path,
+                        git_command=["commit", "-m", ug_msg],
+                        description="commit ungrouped",
+                    )
+                else:
+                    res = subprocess.run(
+                        ["git", "commit", "-m", ug_msg],
+                        cwd=repo_path, capture_output=True,
+                    )
+                    try:
+                        res.stdout = res.stdout.decode("utf-8")
+                        res.stderr = res.stderr.decode("utf-8")
+                    except Exception:
+                        pass
+
+                if res.returncode == 0:
+                    committed_count += 1
+                    print(f"  {Colors.GREEN}✅ Ungrouped hunks committed.{Colors.RESET}")
+                else:
+                    print(f"  {Colors.RED}❌ Commit failed: {res.stderr.strip()}{Colors.RESET}")
+            else:
+                print(f"  {Colors.RED}Could not stage ungrouped patch.{Colors.RESET}")
+
+    # ── 7. Final summary ──────────────────────────────────────────────────────
+    print(f"\n{'═' * 72}")
+    print(f"  Semantic commit complete.")
+    print(f"  {Colors.GREEN}{committed_count} commit(s) created.{Colors.RESET}", end="")
+    if skipped_groups:
+        print(f"  {Colors.YELLOW}{len(skipped_groups)} group(s) skipped (still in working tree).{Colors.RESET}", end="")
+    print()
+    if committed_count > 0:
+        print()
+        print(f"  {Colors.DIM}Each commit is independently revertable:")
+        print(f"  git revert HEAD      ← undo the last group only")
+        print(f"  git revert HEAD~N    ← undo N commits back{Colors.RESET}")
+    print(f"{'═' * 72}")
+    input("\nPress Enter to continue...")
+    return committed_count > 0
+
+
 def interactive_commit(analyzer: ChangeAnalyzer):
     """Interactive commit workflow."""
     builder = CommitMessageBuilder(analyzer)
@@ -2979,6 +3674,8 @@ def review_all_changes(analyzer: ChangeAnalyzer):
         all_files.append(item)
     for item in analyzer.changes['other']:
         all_files.append(item)
+    for item in analyzer.changes['submodules']:
+        all_files.append(item)
 
     # Also include translations (flattened) so nothing is hidden
     for lang_files in analyzer.changes['translations'].values():
@@ -3004,6 +3701,8 @@ def review_all_changes(analyzer: ChangeAnalyzer):
         summary_parts.append(f"{len(analyzer.changes['config'])} config")
     if analyzer.changes['other']:
         summary_parts.append(f"{len(analyzer.changes['other'])} other")
+    if analyzer.changes['submodules']:
+        summary_parts.append(f"{len(analyzer.changes['submodules'])} submodule(s)")
     trans_count = sum(len(f) for f in analyzer.changes['translations'].values())
     if trans_count:
         summary_parts.append(f"{trans_count} translation(s)")
@@ -3088,12 +3787,13 @@ def main_with_repo(repo_path: Path):
         print("  5. Review documentation changes")
         print("  6. Review config changes")
         print("  7. Clean untracked files (delete junk)")
-        print("  8. Proceed to commit")
-        print("  9. Exit")
+        print(f"  8. {Colors.CYAN}Semantic commit{Colors.RESET}  (group by contract — one commit per group, CI-safe)")
+        print("  9. Proceed to commit  (standard — one commit for everything)")
+        print(" 10. Exit")
         print()
-        
+
         try:
-            choice = input("Choose option (0-9): ").strip()
+            choice = input("Choose option (0-10): ").strip()
         except KeyboardInterrupt:
             print("\n\nCancelled.")
             sys.exit(0)
@@ -3144,9 +3844,14 @@ def main_with_repo(repo_path: Path):
             analyzer.analyze_changes()
             analyzer.display_summary()
         elif choice == '8':
+            semantic_commit(analyzer)
+            # Re-analyze after semantic commits — some changes may now be committed
+            analyzer.analyze_changes()
+            analyzer.display_summary()
+        elif choice == '9':
             interactive_commit(analyzer)
             break
-        elif choice == '9':
+        elif choice == '10':
             print("Exiting.")
             break
         else:

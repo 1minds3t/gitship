@@ -637,12 +637,9 @@ def has_translation_changes(repo_path: Path) -> bool:
 
 def extract_changelog_section(repo_path: Path, version: str) -> str:
     """Extract changelog content for a specific version."""
-    cl_path = repo_path / "CHANGELOG.md"
+    cl_path = get_project_changelog_path(repo_path)
     if not cl_path.exists(): return ""
     content = cl_path.read_text()
-    
-    # Match "## [0.2.2] — 2026-02-14" (with em dash)
-    # Capture everything until next ## or end of file
     pattern = rf"## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## \[|\Z)"
     match = re.search(pattern, content, re.DOTALL)
     if match:
@@ -982,7 +979,7 @@ def write_changelog(repo_path: Path, notes: str, version: str):
     """
     Write changelog entry with proper title format.
     """
-    cl = repo_path / "CHANGELOG.md"
+    cl = get_project_changelog_path(repo_path)
     
     # POST-PROCESS: Add header if missing, with em dash
     if not notes.strip().startswith(f"## [{version}]"):
@@ -1458,7 +1455,7 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = "", 
         changelog_content = extract_changelog_section(repo_path, version_no_v)
         if not changelog_content:
             # Fallback: try to read the first section manually
-            cl_path = repo_path / "CHANGELOG.md"
+            cl_path = get_project_changelog_path(repo_path)
             if cl_path.exists():
                 content = cl_path.read_text()
                 parts = content.split("## [")
@@ -1588,6 +1585,10 @@ def _main_logic(repo_path: Path):
     # This prevents releasing without the ability to publish
     from . import pypi
     package_name = pypi.read_package_name(repo_path)
+    if package_name:
+        print(f"{Colors.DIM}📦 PyPI package: {Colors.RESET}{Colors.BRIGHT_CYAN}{package_name}{Colors.RESET}")
+    else:
+        print(f"{Colors.YELLOW}⚠️  No PyPI package name detected{Colors.RESET}")
     if package_name:
         # Check/Create workflow silently or interactively based on existence
         workflow_path = repo_path / ".github" / "workflows" / "publish.yml"
@@ -1849,91 +1850,102 @@ def _main_logic(repo_path: Path):
     unpushed = get_unpushed_commits(repo_path)
     
     # STATE DETECTION
-    
+
+    # Resolve the actual git tag for current_ver (respects CVE scheme, branch suffix, etc.)
+    _current_branch_for_tag = get_current_branch(repo_path)
+    _resolved_current_tag = _build_tag_name(current_ver, _current_branch_for_tag, repo_path)
+
     # Case 0: Tag exists remotely but commits not pushed (Orphaned Tag)
-    if current_ver == last_ver and unpushed > 0 and check_remote_tag(repo_path, f"v{current_ver}"):
-        print(f"🚨 ORPHANED TAG DETECTED: v{current_ver}")
-        print(f"   Remote has tag v{current_ver}, but you have {unpushed} unpushed commits")
-        print(f"   For PyPI to work, the tag MUST point to commits that exist on remote.")
-        print(f"\n   FIX REQUIRED:")
-        print(f"   1. Delete orphaned tag (local + remote)")
-        print(f"   2. Push {unpushed} commits")
-        print(f"   3. Recreate tag pointing to pushed commits")
-        
-        print("\nWhat would you like to do?")
-        print(f"  1. AUTO-FIX:  Delete tag, push commits, recreate tag (recommended)")
-        print(f"  2. ABORT:     Exit and handle manually")
-        
-        choice = input("\nChoice (1-2): ").strip()
-        
-        if choice == '1':
-            tag = f"v{current_ver}"
-            
-            # Step 1: Delete tag (remote then local)
-            print(f"\n🗑️  Step 1/3: Deleting orphaned tag {tag}...")
-            try:
+    # Use the resolved tag name, not a hardcoded "v{current_ver}" assumption.
+    if current_ver == last_ver and unpushed > 0 and check_remote_tag(repo_path, _resolved_current_tag):
+
+        # FIRST: check if this version is already published on PyPI.
+        # If it is, the tag/release are immutable — AUTO-FIX (retag) is not valid.
+        # We must publish a new version. Don't even show the retag option.
+        _case0_pkg = None
+        _case0_on_pypi = False
+        try:
+            from . import pypi as _c0_pypi
+            _case0_pkg = _c0_pypi.read_package_name(repo_path)
+            if _case0_pkg:
+                import requests as _c0_req
+                _c0_resp = _c0_req.get(f"https://pypi.org/pypi/{_case0_pkg}/json", timeout=5)
+                if _c0_resp.status_code == 200:
+                    _c0_releases = _c0_resp.json().get('releases', {})
+                    _c0_ver = current_ver.lstrip('v')
+                    _case0_on_pypi = _c0_ver in _c0_releases
+        except Exception:
+            pass
+
+        if _case0_on_pypi:
+            # Version is live on PyPI — retag is meaningless and wrong.
+            # Compute a patch suggestion and fall straight through to the bump menu.
+            _c0_base = current_ver.lstrip('v')
+            _c0_pm = re.match(r'^(\d+\.\d+\.\d+)\.post(\d+)$', _c0_base)
+            _c0_d4 = re.match(r'^(\d+\.\d+\.\d+)\.(\d+)$', _c0_base)
+            if _c0_pm:
+                _c0_post = f"{_c0_pm.group(1)}.post{int(_c0_pm.group(2)) + 1}"
+            elif _c0_d4:
+                _c0_post = f"{_c0_d4.group(1)}.{int(_c0_d4.group(2)) + 1}"
+            else:
+                _c0_post = f"{_c0_base}.post1"
+
+            print(f"\n📦 {_case0_pkg} {_c0_base} is already published on PyPI.")
+            print(f"   The existing tag {_resolved_current_tag} and release are immutable.")
+            print(f"   You have {unpushed} unpushed commit(s) — these become your next release.")
+            print(f"\n   Suggested next version: {Colors.BRIGHT_GREEN}{_c0_post}{Colors.RESET}")
+            print(f"   (or choose any version in the bump menu below)\n")
+            # Fall through to the normal bump flow — Case 2 semver menu
+            # which now includes the [5] same-base patch option.
+
+        else:
+            # Version is NOT on PyPI yet — retag is legitimate.
+            print(f"\n🚨 ORPHANED TAG DETECTED: {_resolved_current_tag}")
+            print(f"   Remote has tag {_resolved_current_tag}, but you have {unpushed} unpushed commits.")
+            print(f"   The tag points to an older commit — PyPI publish will fail.")
+            print(f"\n   FIX: delete the tag, push your commits, recreate the tag at HEAD.")
+
+            print("\nWhat would you like to do?")
+            print(f"  1. AUTO-FIX:  Delete tag, push commits, recreate tag at HEAD (recommended)")
+            print(f"  2. ABORT:     Exit and handle manually")
+
+            choice = input("\nChoice (1-2): ").strip()
+
+            if choice == '1':
+                tag = _resolved_current_tag
+
+                print(f"\n🗑️  Step 1/3: Deleting orphaned tag {tag}...")
                 run_git(["push", "origin", f":refs/tags/{tag}"], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted remote tag {tag}")
-            except:
-                print(f"  ! Remote tag delete failed (may not exist)")
-            
-            try:
                 run_git(["tag", "-d", tag], cwd=repo_path, check=False)
                 print(f"  ✓ Deleted local tag {tag}")
-            except:
-                print(f"  ! Local tag delete failed (may not exist)")
-            
-            # Step 2: Push commits
-            stashed = handle_translation_stash(repo_path)
-            print(f"\n📤 Step 2/3: Pushing {unpushed} commits to origin/main...")
-            try:
+
+                stashed = handle_translation_stash(repo_path)
+                print(f"\n📤 Step 2/3: Pushing {unpushed} commits to origin/{_current_branch_for_tag}...")
                 result = subprocess.run(
-                    ["git", "pull", "origin", "main", "--rebase"],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True
+                    ["git", "pull", "origin", _current_branch_for_tag, "--rebase"],
+                    cwd=repo_path, capture_output=True, text=True
                 )
-                
                 if result.returncode != 0 and ("CONFLICT" in result.stdout or "CONFLICT" in result.stderr):
-                    print("\n⚠️  MERGE CONFLICTS during rebase!")
-                    print("  You're in the middle of fixing an orphaned tag.")
-                    print("  Please resolve conflicts manually, then re-run gitship.")
-                    print("\n  Quick commands:")
-                    print("    - Resolve conflicts in files")
-                    print("    - git add <resolved-files>")
-                    print("    - git rebase --continue")
-                    print("    - Re-run: gitship releasegit")
-                    if stashed:
-                        restore_translation_stash(repo_path)
+                    print("\n⚠️  MERGE CONFLICTS during rebase! Resolve manually then re-run gitship.")
+                    if stashed: restore_translation_stash(repo_path)
                     sys.exit(1)
-                
-                run_git(["push", "origin", "main"], cwd=repo_path)
+                run_git(["push", "origin", _current_branch_for_tag], cwd=repo_path)
                 print("  ✓ Commits pushed successfully!")
-            except SystemExit:
-                print("\n⚠️  Commit push failed. Cannot recreate tag safely.")
-                if stashed:
-                    restore_translation_stash(repo_path)
-                sys.exit(1)
-            
-            # Step 3: Recreate tag
-            print(f"\n🏷️  Step 3/3: Recreating tag {tag}...")
-            try:
+
+                print(f"\n🏷️  Step 3/3: Recreating tag {tag} at HEAD...")
                 run_git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=repo_path)
                 run_git(["push", "origin", tag], cwd=repo_path)
                 print(f"  ✓ Tag {tag} created and pushed!")
-                print("\n🎉 Orphaned tag fixed! PyPI should work now.")
-            except SystemExit:
-                print(f"\n⚠️  Tag creation/push failed.")
-                sys.exit(1)
-            
-            if stashed:
-                restore_translation_stash(repo_path)
-            return
-                
-        else:
-            print("Exiting. Handle the orphaned tag manually.")
-            return
-    
+                print("\n🎉 Orphaned tag fixed! PyPI publish should work now.")
+                if stashed: restore_translation_stash(repo_path)
+                return
+
+            else:
+                print("Exiting. Handle the orphaned tag manually.")
+                return
+            # AUTO-FIX returned above — nothing falls through from the else branch.
+
     # Case 1: Version bumped but not tagged (In Progress)
     # Case 1: Version bumped but not tagged (In Progress)
     if current_ver != last_ver and current_ver > last_ver:
@@ -2133,7 +2145,8 @@ def _main_logic(repo_path: Path):
             if len(parts) == 2:
                 status_code, filename = parts
                 # Exclude translations and changelog
-                if '/locale/' not in filename and 'CHANGELOG.md' not in filename:
+                _cl_rel_check = str(get_project_changelog_path(repo_path).relative_to(repo_path))
+                if '/locale/' not in filename and _cl_rel_check not in filename and 'CHANGELOG.md' not in filename:
                     code_changes.append(filename)
         
         # Check if commits are ahead of the tag
@@ -2166,36 +2179,43 @@ def _main_logic(repo_path: Path):
             from . import pypi
             package_name = pypi.read_package_name(repo_path)
             on_pypi = False
+            _inc_ver_str = last_tag_full.lstrip('v') if last_tag_full else current_ver.lstrip('v')
             if package_name:
-                # Check if this specific version exists
                 try:
                     import requests
-                    # Get the version without 'v' prefix
-                    check_ver = current_ver.lstrip('v') if current_ver.startswith('v') else current_ver
-                    # Also try the tag format
-                    tag_ver = last_tag_full.lstrip('v') if last_tag_full and last_tag_full.startswith('v') else last_tag_full
-                    
+                    check_ver = current_ver.lstrip('v')
+                    tag_ver = last_tag_full.lstrip('v') if last_tag_full else check_ver
                     resp = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
                     if resp.status_code == 200:
-                        data = resp.json()
-                        releases = data.get('releases', {})
-                        # Check both current_ver and tag format
+                        releases = resp.json().get('releases', {})
                         on_pypi = check_ver in releases or tag_ver in releases
                         if on_pypi:
-                            print(f"[DEBUG] Found {check_ver} or {tag_ver} in PyPI releases: {list(releases.keys())[-5:]}")
+                            print(f"   {Colors.DIM}Confirmed on PyPI: {package_name} {_inc_ver_str}{Colors.RESET}")
                 except Exception as e:
-                    print(f"[DEBUG] PyPI check failed: {e}")
+                    print(f"{Colors.YELLOW}⚠️  PyPI check failed: {e}{Colors.RESET}")
                     on_pypi = False
-            
+
             print("\nWhat would you like to do?")
             if on_pypi:
-                print(f"  1. NEW RELEASE: Bump to next version (REQUIRED)")
+                # Compute patch suggestion
+                _inc_pm = re.match(r'^(\d+\.\d+\.\d+)\.post(\d+)$', _inc_ver_str)
+                _inc_d4 = re.match(r'^(\d+\.\d+\.\d+)\.(\d+)$', _inc_ver_str)
+                if _inc_pm:
+                    _inc_post = f"{_inc_pm.group(1)}.post{int(_inc_pm.group(2)) + 1}"
+                elif _inc_d4:
+                    _inc_post = f"{_inc_d4.group(1)}.{int(_inc_d4.group(2)) + 1}"
+                else:
+                    _inc_post = f"{_inc_ver_str}.post1"
+                print(f"\n   {Colors.YELLOW}{last_tag_full} is already on PyPI — tag and release are immutable.{Colors.RESET}")
+                print(f"   Your {commits_ahead} commit(s) ahead become the next release.")
+                print(f"   Suggested: {Colors.BRIGHT_GREEN}{_inc_post}{Colors.RESET}  (bump in menu below)")
+                print(f"\n  1. NEW RELEASE: Choose version and release (bump menu)")
                 print(f"  2. EXIT")
                 choice = input("\nChoice (1-2): ").strip()
                 if choice == '1':
-                    choice = '2'  # Map to NEW RELEASE option
-                elif choice == '2':
-                    choice = '3'  # Map to EXIT
+                    choice = '2'  # fall through to bump menu
+                else:
+                    choice = '3'  # exit
             else:
                 print(f"  1. FIX IT: Delete release/tag, commit changes, recreate {last_tag_full}")
                 print(f"  2. NEW RELEASE: Bump to next version and release these as new")
@@ -2305,7 +2325,7 @@ def _main_logic(repo_path: Path):
                         print("   ! No changelog found. Opening editor...")
                         # FIX: Provide default title and unpack tuple
                         default_suffix = "Release"
-                        changelog_notes, github_notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=repo_path.name)
+                        changelog_notes, github_notes, user_title = edit_notes(current_ver, "", default_suffix, pkg_name=package_name or repo_path.name)
                         
                         # NOW update changelog with the notes user just wrote
                         if notes:
@@ -2710,21 +2730,53 @@ def _main_logic(repo_path: Path):
             parts.append('0')
         try:
             major, minor, patch_n = int(parts[0]), int(parts[1]), int(parts[2])
+
+            # Detect if current version already has a .postN or .N suffix beyond semver
+            # e.g. "0.10.8" base; "0.10.8.post1" or "0.10.8.1" would be same-upstream patches
+            _post_match = re.match(r'^(\d+\.\d+\.\d+)\.post(\d+)$', current_ver)
+            _dot4_match = re.match(r'^(\d+\.\d+\.\d+)\.(\d+)$', current_ver)
+            if _post_match:
+                _post_base = _post_match.group(1)
+                _post_n    = int(_post_match.group(2))
+                _auto_post = f"{_post_base}.post{_post_n + 1}"
+            elif _dot4_match:
+                _post_base = _dot4_match.group(1)
+                _post_n    = int(_dot4_match.group(2))
+                _auto_post = f"{_post_base}.{_post_n + 1}"
+            else:
+                _post_base = current_ver
+                _auto_post = f"{current_ver}.post1"
+
             opts = {
                 '1': ('patch', f"{major}.{minor}.{patch_n+1}"),
                 '2': ('minor', f"{major}.{minor+1}.0"),
                 '3': ('major', f"{major+1}.0.0"),
+                '5': ('post',  _auto_post),
             }
             recommendation, reasoning = _recommend_bump_type(repo_path, last_tag_full)
-            print(f"\n  [1] Patch   {current_ver} -> {opts['1'][1]}")
-            print(f"  [2] Minor   {current_ver} -> {opts['2'][1]}")
-            print(f"  [3] Major   {current_ver} -> {opts['3'][1]}")
-            print(f"  [4] Custom  enter version + optional tag manually")
+            print(f"\n  [1] Patch        {current_ver} -> {opts['1'][1]}")
+            print(f"  [2] Minor        {current_ver} -> {opts['2'][1]}")
+            print(f"  [3] Major        {current_ver} -> {opts['3'][1]}")
+            print(f"  [4] Custom       enter version + optional tag manually")
+            print(f"  [5] Same-base patch  {current_ver} -> {opts['5'][1]}  (patch on same upstream, e.g. maturin/FFI fix)")
             print(f"\n  💡 Recommended: {recommendation.upper()} — {reasoning}")
             c = input("\nBump type: ").strip()
 
             if c in opts:
                 new_ver = opts[c][1]
+                if c == '5':
+                    _suggested_post_tag = f"v{new_ver}"
+                    print(f"  Suggested tag: {_suggested_post_tag}")
+                    print(f"  {Colors.DIM}(Or enter a custom tag, e.g. {_post_base}-patch.1){Colors.RESET}")
+                    custom_input = input(f"  Tag (enter to use suggested): ").strip()
+                    if custom_input:
+                        if not _validate_git_tag(custom_input):
+                            print(f"  ⚠️  '{custom_input}' contains characters invalid for git tags.")
+                            if input("  Use anyway? [y/N]: ").strip().lower() != 'y':
+                                return
+                        custom_tag = custom_input
+                    else:
+                        custom_tag = _suggested_post_tag
             elif c == '4':
                 new_ver = input("  Version (PyPI): ").strip()
                 if not new_ver:
@@ -2793,7 +2845,7 @@ def _main_logic(repo_path: Path):
             is_first_release = False
     
     smart_suffix = "Initial Release" if is_first_release else suggested_title
-    changelog_notes, github_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=repo_path.name)
+    changelog_notes, github_notes, release_title = edit_notes(new_ver, draft, smart_suffix, pkg_name=pkg_name_check or repo_path.name)
     write_changelog(repo_path, changelog_notes, new_ver)
     
     # Finish

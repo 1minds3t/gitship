@@ -253,9 +253,29 @@ class VSCodeHistory:
         print(f"  Files found: {len(self.file_versions)}")
         print()
 
-        sorted_files = sorted(self.file_versions.items())
+        # Sort by most recently changed first (latest snapshot timestamp)
+        sorted_files = sorted(
+            self.file_versions.items(),
+            key=lambda x: x[1][0]["timestamp"],
+            reverse=True,
+        )
         restored = 0
         skipped = 0
+
+        # Optional search filter
+        search_term = ""
+        print("  🔍 Filter by filename (Enter to show all): ", end="")
+        try:
+            search_term = input().strip().lower()
+        except KeyboardInterrupt:
+            print()
+            return
+        if search_term:
+            sorted_files = [(r, v) for r, v in sorted_files if search_term in r.lower()]
+            if not sorted_files:
+                _safe_print(f"  ⚠️  No files matching '{search_term}' found.")
+                return
+            _safe_print(f"  ✓ Showing {len(sorted_files)} file(s) matching '{search_term}'\n")
 
         for rel_path, versions in sorted_files:
             current = self.target_dir / rel_path
@@ -440,6 +460,10 @@ Examples:
                         help="List files with available history and exit")
     parser.add_argument("--no-backup", action="store_true",
                         help="Don't create .bak files before overwriting")
+    parser.add_argument("--search", metavar="TERM",
+                        help="Only show files matching this name pattern")
+    parser.add_argument("--recent", metavar="N", type=int,
+                        help="Only show the N most recently changed files")
 
     args = parser.parse_args()
 
@@ -456,6 +480,18 @@ Examples:
             print(f"  📄 {rel_path}  ({len(versions)} versions, latest: {latest})")
         return
 
+    if args.search:
+        restorer.file_versions = {
+            k: v for k, v in restorer.file_versions.items()
+            if args.search.lower() in k.lower()
+        }
+        if not restorer.file_versions:
+            _safe_print(f"  No files matching '{args.search}' found.")
+            return
+    if args.recent:
+        items = sorted(restorer.file_versions.items(),
+                       key=lambda x: x[1][0]["timestamp"], reverse=True)
+        restorer.file_versions = dict(items[:args.recent])
     restorer.interactive_restore(
         backup=not args.no_backup,
         dry_run=args.dry_run,
