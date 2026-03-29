@@ -684,7 +684,147 @@ def offer_manual_publish(repo_path: Path):
                 print(f"{Colors.RED}✗ Upload failed{Colors.RESET}")
 
 
-def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, username: str, title_suffix: str = None):
+def update_pypi_description(repo_path: Path, package_name: str):
+    """
+    Update PyPI project description/readme by publishing a new release
+    or by editing the pyproject.toml description field.
+
+    PyPI does NOT allow editing description/readme of existing releases via API.
+    The only way to update the long description (readme) is to publish a new version.
+    However, the short description (summary) and project URLs can be updated
+    by publishing a new release with the same or higher version number.
+
+    This function:
+    1. Shows the current description from pyproject.toml
+    2. Lets the user edit it
+    3. Asks whether to bundle it into the next release or just update the file
+    """
+    print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
+    print(f"{Colors.BOLD}📝 UPDATE PYPI DESCRIPTION{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}\n")
+
+    # Find the relevant pyproject.toml (maturin crate or root)
+    pyproject_path = None
+    if tomllib is not None:
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
+            rel = candidate.relative_to(repo_path)
+            parts = rel.parts
+            if len(parts) > 5:
+                continue
+            if any(p.startswith('.') or p in SKIP_DIRS for p in parts):
+                continue
+            try:
+                with open(candidate, 'rb') as f:
+                    data = tomllib.load(f)
+                is_maturin = (
+                    ('tool' in data and 'maturin' in data.get('tool', {}))
+                    or data.get('build-system', {}).get('build-backend', '') == 'maturin'
+                )
+                if is_maturin:
+                    name = data.get('project', {}).get('name', '')
+                    if name == package_name or not name:
+                        pyproject_path = candidate
+                        break
+            except Exception:
+                continue
+
+    if pyproject_path is None:
+        pyproject_path = repo_path / "pyproject.toml"
+
+    if not pyproject_path.exists():
+        print(f"{Colors.RED}✗ Could not find pyproject.toml{Colors.RESET}")
+        return
+
+    content = pyproject_path.read_text()
+
+    # Show current description
+    import re as _re
+    desc_match = _re.search(r'^description\s*=\s*"(.*?)"', content, _re.MULTILINE)
+    current_desc = desc_match.group(1) if desc_match else "(not set)"
+
+    print(f"Package:          {Colors.GREEN}{package_name}{Colors.RESET}")
+    print(f"pyproject.toml:   {Colors.DIM}{pyproject_path.relative_to(repo_path)}{Colors.RESET}")
+    print(f"\nCurrent short description:")
+    print(f"  {Colors.CYAN}{current_desc}{Colors.RESET}")
+
+    # Check for readme
+    readme_match = _re.search(r'readme\s*=\s*"(.*?)"', content, _re.MULTILINE)
+    if readme_match:
+        readme_file = pyproject_path.parent / readme_match.group(1)
+        print(f"\nLong description (readme): {Colors.DIM}{readme_match.group(1)}{Colors.RESET}")
+        if readme_file.exists():
+            preview = readme_file.read_text()[:300]
+            print(f"  {Colors.DIM}{preview}...{Colors.RESET}" if len(preview) == 300 else f"  {Colors.DIM}{preview}{Colors.RESET}")
+
+    print(f"\n{Colors.YELLOW}Note: PyPI only updates descriptions when a NEW version is published.{Colors.RESET}")
+    print(f"{Colors.DIM}Editing the description here updates your source files;{Colors.RESET}")
+    print(f"{Colors.DIM}the change takes effect on PyPI when you do your next release.{Colors.RESET}")
+
+    print(f"\nWhat would you like to update?")
+    print(f"  1. Short description  (pyproject.toml [project] description)")
+    print(f"  2. README / long description  (opens editor)")
+    print(f"  3. Both")
+    print(f"  4. Cancel")
+
+    try:
+        upd_choice = input("\nChoice (1-4): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
+
+    if upd_choice == '4':
+        return
+
+    changed = False
+
+    if upd_choice in ('1', '3'):
+        print(f"\n  Current: {Colors.CYAN}{current_desc}{Colors.RESET}")
+        try:
+            new_desc = input("  New description (Enter to keep): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            new_desc = ""
+        if new_desc and new_desc != current_desc:
+            new_content = _re.sub(
+                r'^(description\s*=\s*)".*?"',
+                lambda m: f'{m.group(1)}"{new_desc}"',
+                content,
+                flags=_re.MULTILINE
+            )
+            pyproject_path.write_text(new_content)
+            content = new_content
+            print(f"  {Colors.GREEN}✓ Short description updated{Colors.RESET}")
+            changed = True
+        else:
+            print(f"  {Colors.DIM}No change{Colors.RESET}")
+
+    if upd_choice in ('2', '3'):
+        if readme_match:
+            readme_file = pyproject_path.parent / readme_match.group(1)
+            editor = __import__('os').environ.get('EDITOR', 'nano')
+            print(f"\n  Opening {readme_file.name} in {editor}...")
+            __import__('subprocess').call([editor, str(readme_file)])
+            print(f"  {Colors.GREEN}✓ README updated (save the file in your editor){Colors.RESET}")
+            changed = True
+        else:
+            print(f"  {Colors.YELLOW}No readme field found in pyproject.toml{Colors.RESET}")
+            print(f"  Add:  readme = \"README.md\"  to [project] and create the file.")
+
+    if changed:
+        print(f"\n{Colors.BRIGHT_YELLOW}Description changes saved locally.{Colors.RESET}")
+        print(f"They will appear on PyPI when you publish your next release.")
+        try:
+            stage = input(f"\nStage changes in git now? (y/n): ").strip().lower()
+            if stage == 'y':
+                import subprocess as _sp
+                _sp.run(["git", "add", str(pyproject_path)], cwd=repo_path)
+                if readme_match:
+                    _sp.run(["git", "add", str(pyproject_path.parent / readme_match.group(1))], cwd=repo_path)
+                print(f"  {Colors.GREEN}✓ Staged{Colors.RESET}")
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+
+def handle_pypi_publishing(repo_path: Path, version: str, changelog: str, username: str, title_suffix: str = None, offer_description_update: bool = False):
     """
     Main entry point for PyPI publishing flow.
     

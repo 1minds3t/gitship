@@ -73,6 +73,50 @@ def get_current_version(repo_path: Path) -> str:
     match = re.search(r'^version\s*=\s*"(.*?)"', content, re.MULTILINE)
     return match.group(1) if match else "0.0.0"
 
+def get_project_toml_path(repo_path: Path) -> Path:
+    """
+    Return the pyproject.toml whose [project] version field we should
+    read/write for this release.
+
+    Strategy:
+    1. Ask read_package_name for the saved/resolved package name.
+    2. Scan for a pyproject.toml that has [project] name = that package.
+    3. Fall back to root pyproject.toml if nothing better is found.
+    """
+    try:
+        from . import pypi as _pypi_helper
+        pkg_name = _pypi_helper.read_package_name(repo_path)
+        if not pkg_name:
+            return repo_path / "pyproject.toml"
+
+        try:
+            import tomllib as _tl
+        except ImportError:
+            try:
+                import tomli as _tl
+            except ImportError:
+                return repo_path / "pyproject.toml"
+
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
+            rel = candidate.relative_to(repo_path)
+            if len(rel.parts) > 6:
+                continue
+            if any(p.startswith('.') or p in SKIP_DIRS for p in rel.parts):
+                continue
+            try:
+                with open(candidate, 'rb') as f:
+                    data = _tl.load(f)
+                name = data.get('project', {}).get('name', '')
+                if name == pkg_name and 'version' in data.get('project', {}):
+                    return candidate
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return repo_path / "pyproject.toml"
+
 def get_pypi_latest_version(repo_path: Path) -> Optional[str]:
     """Get the latest version published on PyPI."""
     try:
@@ -549,7 +593,9 @@ def get_repo_url(repo_path: Path) -> str:
 def is_dirty(repo_path: Path) -> bool:
     """Check if relevant files are modified."""
     res = run_git(["status", "--porcelain"], cwd=repo_path)
-    return "pyproject.toml" in res or "CHANGELOG.md" in res
+    _toml_rel = str(get_project_toml_path(repo_path).relative_to(repo_path))
+    _cl_rel   = str(get_project_changelog_path(repo_path).relative_to(repo_path))
+    return _toml_rel in res or _cl_rel in res or "CHANGELOG.md" in res
 
 def get_unpushed_commits(repo_path: Path) -> int:
     """Get count of commits ahead of origin/main."""
