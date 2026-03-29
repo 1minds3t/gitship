@@ -5,17 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] — 2026-03-11
+## [0.7.0] — 2026-03-29
 
-d
+AST Semantic Commits & Hunk Merger
+
+This update introduces a revolutionary way to handle complex branch merges and commits by moving from "file-based" logic to "contract-based" logic.
+
+- **AST Semantic Grouping**: A new engine (`hunk_grouper_ast`) that analyzes Python code structure to cluster changes by their actual relationship (function calls, IPC messages, and custom exceptions) rather than just filename.
+- **Interactive Hunk Merger**: A high-precision tool (`hunk_merger`) for porting changes between branches line-by-line. Includes:
+    - **Syntax Safety**: Auto-checks Python compilation after every apply and auto-reverts on failure.
+    - **Undo Stack**: Byte-exact snapshots let you undo any applied hunk immediately.
+    - **Impact Analysis**: See exactly which functions a hunk touches and who calls them before you apply it.
+- **Semantic Commit Flow**: A new "Semantic Commit" option (Choice 8) that lets you stage and commit logic groups independently, ensuring a clean, bisectable history even for massive refactors.
+
+- **Gitship Repair**: Added a dedicated repository repair pipeline (`repair.py`) to heal corrupted repos, clean zero-byte objects, and restore missing blobs.
+- **Smarter Conflict UX**: Replaced generic "OURS/THEIRS" labels with actual branch names during conflict resolution so you always know which side you are keeping.
+- **Remote Management**: New interactive menu to search GitHub and manage upstream remotes directly.
+
+- **Maturin/Rust Support**: Enhanced detection for nested Maturin crates and automatic workflow cancellation when starting a new release.
+- **Dynamic Discovery**: Improved resolution for `pyproject.toml` and `CHANGELOG.md` in complex or nested project structures.
+- **VSCode History**: Added search filtering and "most recent" sorting to the local history restorer.
+
+---
 
 **📝 Code Changes:**
-- UPDATE: src/gitship/branch.py (534 lines changed)
+- UPDATE: src/gitship/branch.py (690 lines changed)
 - UPDATE: src/gitship/cli.py (39 lines changed)
 - UPDATE: src/gitship/config.py (22 lines changed)
 - UPDATE: src/gitship/gitops.py (31 lines changed)
-- UPDATE: src/gitship/pypi.py (76 lines changed)
-- UPDATE: src/gitship/release.py (86 lines changed)
+- UPDATE: src/gitship/pypi.py (218 lines changed)
+- UPDATE: src/gitship/release.py (412 lines changed)
 - NEW: src/gitship/repair.py (283 lines changed)
 - UPDATE: src/gitship/resolve_conflicts.py (173 lines changed)
 
@@ -24,7 +43,7 @@ d
 - feat: smart maturin crate detection with config persistence + auto-cancel running workflows
 - feat: add repair command, remote management, and smarter conflict resolution
 
-_8 files changed, 1110 insertions(+), 134 deletions(-)_
+_14 files changed, 6022 insertions(+), 265 deletions(-)_
 
 ## [0.6.0] — 2026-02-25
 
