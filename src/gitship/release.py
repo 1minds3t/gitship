@@ -56,6 +56,16 @@ def run_git(args, cwd=None, check=True):
         print(f"Git error: {' '.join(args)}\n{e.stderr}")
         sys.exit(1)
 
+def get_project_changelog_path(repo_path: Path) -> Path:
+    """
+    Return the CHANGELOG.md that belongs to the package being released.
+    Sits next to the maturin crate's pyproject.toml when found, otherwise root.
+    """
+    toml_path = get_project_toml_path(repo_path)
+    # CHANGELOG lives in the same directory as the authoritative pyproject.toml
+    cl = toml_path.parent / "CHANGELOG.md"
+    return cl
+
 def get_current_version(repo_path: Path) -> str:
     toml = repo_path / "pyproject.toml"
     if not toml.exists(): return "0.0.0"
@@ -1106,7 +1116,7 @@ def reset_version_to_tag(repo_path: Path):
         return
     
     # Update pyproject.toml
-    toml_path = repo_path / "pyproject.toml"
+    toml_path = get_project_toml_path(repo_path)
     content = toml_path.read_text()
     
     # Replace version line
@@ -1235,7 +1245,11 @@ def perform_git_release(repo_path: Path, version: str, release_title: str = "", 
 
     # Get ALL modified files (excluding translations)
     status_output = run_git(["status", "--porcelain"], cwd=repo_path)
-    files_to_add = ["pyproject.toml", "CHANGELOG.md"]
+    _proj_toml = get_project_toml_path(repo_path)
+    _proj_cl   = get_project_changelog_path(repo_path)
+    _toml_rel  = str(_proj_toml.relative_to(repo_path))
+    _cl_rel    = str(_proj_cl.relative_to(repo_path))
+    files_to_add = [_toml_rel, _cl_rel]
 
     for line in status_output.split('\n'):
         line = line.strip()
@@ -2008,7 +2022,7 @@ def _main_logic(repo_path: Path):
             
         elif choice == '3':
             print(f"Reverting pyproject.toml to {last_ver}...")
-            toml = repo_path / "pyproject.toml"
+            toml = get_project_toml_path(repo_path)
             content = toml.read_text()
             toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{last_ver}"', content, count=1, flags=re.MULTILINE))
             print("Done. Exiting.")
@@ -2694,10 +2708,10 @@ def _main_logic(repo_path: Path):
     print(f"\n  {current_ver}  ->  {new_ver}  (tag: {custom_tag or _build_tag_name(new_ver, current_branch)})")
     
     # Update TOML immediately
-    toml = repo_path / "pyproject.toml"
+    toml = get_project_toml_path(repo_path)
     content = toml.read_text()
     toml.write_text(re.sub(r'^version\s*=\s*".*?"', f'version = "{new_ver}"', content, count=1, flags=re.MULTILINE))
-    print("✓ Updated pyproject.toml")
+    print(f"✓ Updated {toml.relative_to(repo_path)}")
     
     # Show review before changelog
     print("\n📊 Reviewing changes before generating changelog...")
