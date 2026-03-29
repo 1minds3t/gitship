@@ -359,7 +359,13 @@ class ChangeAnalyzer:
     def _categorize_file(self, filepath: str, status: str):
         """Categorize a single file change."""
         path = Path(filepath)
-        
+        abs_path = self.repo_path / filepath
+
+        # Submodule directories — treat as a single atomic entry, never expand
+        if abs_path.is_dir() and _is_submodule_dir(abs_path):
+            self.changes['submodules'].append({'path': filepath, 'status': status, '_is_submodule': True})
+            return
+
         # Translation files
         if 'locale' in path.parts or filepath.endswith(('.po', '.pot', '.mo')):
             self._analyze_translation(filepath, status)
@@ -745,11 +751,20 @@ class CommitMessageBuilder:
             return f"Update translation files ({lang_count} languages)"
 
 
+def _is_submodule_dir(abs_path: Path) -> bool:
+    """Return True if this directory is a git submodule (contains a .git file or dir)."""
+    return (abs_path / '.git').exists()
+
+
 def _expand_dir_entry(item: Dict, repo_path: Path) -> List[Dict]:
     """
     If item is a directory (path ends with / or is a dir on disk), return one
     synthetic entry per file inside it.  Otherwise return [item] unchanged.
     Each expanded entry carries '_dir_parent' so callers can collapse back.
+
+    Submodule directories (those containing a .git entry) are never expanded —
+    they are returned as a single collapsed entry so thousands of vendored files
+    don't flood the review UI.
     """
     if 'old' in item:
         return [item]  # rename — never expand
@@ -757,6 +772,9 @@ def _expand_dir_entry(item: Dict, repo_path: Path) -> List[Dict]:
     abs_path = repo_path / raw_path
     if not abs_path.is_dir():
         return [item]
+    # Submodule — keep as a single entry, never recurse into it
+    if _is_submodule_dir(abs_path):
+        return [{**item, '_is_submodule': True}]
     children = []
     for sub in sorted(abs_path.rglob('*')):
         if sub.is_file():
