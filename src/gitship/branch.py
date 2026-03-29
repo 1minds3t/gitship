@@ -57,6 +57,28 @@ except ImportError:
             check=False
         )
 
+# Hunk-by-hunk interactive merger — loaded lazily so branch.py works standalone
+def _load_hunk_merger():
+    """
+    Returns the run_merge function from hunk_merger.py.
+    Searches: same dir as this file, then tools/, then cwd.
+    Returns None if not found.
+    """
+    import importlib.util
+    candidates = [
+        Path(__file__).parent / "hunk_merger.py",
+        Path(__file__).parent.parent / "tools" / "hunk_merger.py",
+        Path.cwd() / "hunk_merger.py",
+        Path.cwd() / "tools" / "hunk_merger.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("hunk_merger", p)
+            mod  = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
 # ANSI color codes
 class Colors:
     RESET = '\033[0m'
@@ -2722,7 +2744,15 @@ def _browse_diff_by_file(repo_path: Path, source: str, target: str):
             remaining = len(diff_lines) - LIMIT
             print(f"\n{Colors.YELLOW}  ... {remaining} more lines not shown. Use Export (option 6) for the full diff.{Colors.RESET}")
 
-        safe_input(f"\n{Colors.DIM}Press Enter to return to file list...{Colors.RESET}")
+        print(f"\n  h. Hunk-by-hunk merge this file  {Colors.DIM}(interactive: take/keep/edit/skip){Colors.RESET}")
+        action = safe_input(f"{Colors.DIM}Press Enter to return to file list, or 'h' to merge this file: {Colors.RESET}").strip().lower()
+        if action == 'h':
+            mod = _load_hunk_merger()
+            if mod is None:
+                print(f"{Colors.RED}✗ hunk_merger.py not found.{Colors.RESET}")
+            else:
+                mod.run_merge(repo=repo_path, source=source, target=target, file_filter=chosen)
+                safe_input(f"\n{Colors.DIM}Press Enter to return to file list...{Colors.RESET}")
 
 
 def cleanup_redundant_branches(repo_path: Path, target_branch: str = "main"):
