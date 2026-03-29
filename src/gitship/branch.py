@@ -2080,6 +2080,35 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
         else:
             print(f"✅ {Colors.GREEN}CLEAN MERGE EXPECTED{Colors.RESET} (No overlapping file changes)")
 
+    # --- Check for existing hunk merger state ---
+    _hm_state_path = repo_path / ".hunk_merger_state.json"
+    _hm_state = None
+    if _hm_state_path.exists():
+        try:
+            import json as _json
+            _hm_state = _json.loads(_hm_state_path.read_text())
+        except Exception:
+            pass
+
+    _hm_resume_label = ""
+    if _hm_state and _hm_state.get("decisions"):
+        _decisions = _hm_state["decisions"]
+        _counts = {}
+        for _d in _decisions:
+            _a = _d.get("action", "")
+            _counts[_a] = _counts.get(_a, 0) + 1
+        _done  = sum(_counts.values())
+        _skip  = _counts.get("skip", 0)
+        _meta  = _hm_state.get("meta", {})
+        _last  = _meta.get("last_run", "")
+        _hm_resume_label = (
+            f"  {Colors.BRIGHT_YELLOW}▶ RESUME{Colors.RESET}"
+            f"  {Colors.DIM}{_done} decided"
+            + (f"  {_skip} skipped" if _skip else "")
+            + (f"  · {_last}" if _last else "")
+            + f"{Colors.RESET}"
+        )
+
     # --- Options ---
     print(f"\n{Colors.BOLD}ACTIONS:{Colors.RESET}")
     print(f"  1. Merge {Colors.CYAN}{source}{Colors.RESET} ➜ INTO ➜ {Colors.CYAN}{target}{Colors.RESET}")
@@ -2449,6 +2478,92 @@ def compare_branches_simple(repo_path: Path, source: str, target: str):
     elif choice == "6":
         export_comparison(repo_path, source, target, incoming_list, missing_list)
         safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+        compare_branches_simple(repo_path, source, target)
+
+    elif choice == "7":
+        mod = _load_hunk_merger()
+        if mod is None:
+            print(f"\n{Colors.RED}✗ hunk_merger.py not found.{Colors.RESET}")
+            print(f"  Place it in the same directory as branch.py or in tools/hunk_merger.py")
+            safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+            compare_branches_simple(repo_path, source, target)
+            return
+
+        print(f"\n{Colors.BOLD}Hunk-by-hunk merge:{Colors.RESET}  {Colors.CYAN}{source}{Colors.RESET} → {Colors.CYAN}{target}{Colors.RESET}")
+
+        resume = False
+        file_filter = None
+
+        if _hm_state and _hm_state.get("decisions"):
+            _d = _hm_state["decisions"]
+            _counts = {}
+            for _dec in _d:
+                _a = _dec.get("action", "")
+                _counts[_a] = _counts.get(_a, 0) + 1
+            _done = sum(_counts.values())
+            _skip = _counts.get("skip", 0)
+            _last = _hm_state.get("meta", {}).get("last_run", "")
+            print(f"\n  {Colors.BRIGHT_YELLOW}Existing session found:{Colors.RESET}  "
+                  f"{Colors.DIM}{_done} decided"
+                  + (f"  ·  {_skip} skipped" if _skip else "")
+                  + (f"  ·  last run {_last}" if _last else "")
+                  + f"{Colors.RESET}")
+            print(f"\n  r. {Colors.BRIGHT_YELLOW}Resume{Colors.RESET}  (skip already-decided, re-visit skips)")
+            print(f"  n. Start fresh  (review all hunks, prior decisions shown as badges)")
+            print(f"  f. Resume on a specific file only")
+            print(f"  g. {Colors.CYAN}Show grouped hunks{Colors.RESET}  (cross-file symbol dependencies)")
+            print(f"  F. {Colors.BGREEN if hasattr(Colors,'BGREEN') else Colors.GREEN}Finalize{Colors.RESET}  (stash unstaged → commit message → commit)")
+            print(f"  X. {Colors.RED}Reset state{Colors.RESET}  (wipe brain JSON — confirms before deleting)")
+            print(f"  0. Cancel")
+            sub = safe_input(f"\n{Colors.BLUE}  Choice [r/n/f/g/F/X/0]:{Colors.RESET} ").strip().lower()
+            if sub in ("", "r", "resume"):
+                resume = True
+            elif sub in ("n", "new"):
+                resume = False
+            elif sub in ("f", "file"):
+                resume = True
+                file_filter = safe_input(f"  {Colors.DIM}File path: {Colors.RESET}").strip() or None
+            elif sub == "g":
+                mod.show_groups(repo_path, source=source, target=target)
+                safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+                compare_branches_simple(repo_path, source, target)
+                return
+            elif sub in ("F",):
+                mod.finalize(repo_path, _hm_state, source, target)
+                safe_input(f"\n{Colors.DIM}Press Enter to return to comparison...{Colors.RESET}")
+                compare_branches_simple(repo_path, source, target)
+                return
+            elif sub in ("x", "reset"):
+                mod.reset_state(repo_path, force=False)
+                _hm_state = {"decisions": [], "meta": {}}
+                safe_input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+                compare_branches_simple(repo_path, source, target)
+                return
+            elif sub == "0":
+                compare_branches_simple(repo_path, source, target)
+                return
+        else:
+            # No existing session — show full planning menu (grouped view is most useful here)
+            print(f"\n  g. {Colors.CYAN}Show grouped hunks{Colors.RESET}  (cross-file symbol dependencies — plan your commits)")
+            print(f"  s. Start review  (all files)")
+            print(f"  f. Start on a specific file only")
+            print(f"  0. Cancel")
+            sub = safe_input(f"\n{Colors.BLUE}  Choice [g/s/f/0]:{Colors.RESET} ").strip().lower()
+            if sub == "g":
+                mod.show_groups(repo_path, source=source, target=target)
+                safe_input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+                compare_branches_simple(repo_path, source, target)
+                return
+            elif sub in ("f", "file"):
+                file_filter = safe_input(f"  {Colors.DIM}File path: {Colors.RESET}").strip() or None
+            elif sub == "0":
+                compare_branches_simple(repo_path, source, target)
+                return
+            # s or Enter → start all files, file_filter stays None
+
+        mod.run_merge(repo=repo_path, source=source, target=target,
+                      file_filter=file_filter, resume=resume)
+        safe_input(f"\n{Colors.DIM}Press Enter to return to comparison...{Colors.RESET}")
         compare_branches_simple(repo_path, source, target)
 
 
