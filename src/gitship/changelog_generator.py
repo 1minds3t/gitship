@@ -76,7 +76,7 @@ def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
 
         # Skip noise but DON'T skip duplicates
         if any(phrase in subject.lower() for phrase in [
-            "merge", "auto-merge", "sync main", "sync development",
+            "sync main", "sync development",
             "chore: release", "preparing release"
         ]):
             continue
@@ -140,8 +140,9 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
         body = body_parts[1].strip() if len(body_parts) > 1 else ""
 
         # Skip noise
-        if any(phrase in subject.lower() for phrase in [
-            "merge", "auto-merge", "sync main", "sync development",
+        _subj_lower = subject.lower()
+        if any(phrase in _subj_lower for phrase in [
+            "sync main", "sync development",
             "chore: release", "preparing release"
         ]):
             print(f"[DEBUG] SKIP noise: {sha[:8]} {subject[:60]}")
@@ -411,7 +412,14 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     
     # Build comprehensive changelog with ALL changes
     changelog_lines = []
-    
+
+    # Merge new + modified into a single set for categorization
+    all_files = set()
+    for f in all_new_files:
+        all_files.add(f.split('(')[0].strip())
+    for f in all_modified_files:
+        all_files.add(f.split('(')[0].strip())
+
     # Categorize files by type for emoji display
     categorized = {
         'code': [],
