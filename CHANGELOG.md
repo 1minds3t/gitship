@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-04-11
+
+Overhaul hunk merger with semantic region finding and improved UX
+
+This release introduces a fundamental overhaul of the hunk merging engine, making it significantly more resilient to code drift, alongside crucial robustness improvements to the changelog generator.
+
+* **Semantic Hunk Merger:** Replaced the rigid `git apply` approach with a multi-strategy semantic region finder. It intelligently locates insertion points using a progressive strategy (Exact -> Fuzzy -> Semantic -> Scope -> Offset), effortlessly applying changes even when files have diverged.
+* **Enhanced Merge UX:** Added new workflow commands (`te` for take+edit, `oe` for ours+edit) and a powerful direct-region editor that opens only the relevant code chunk rather than the entire file.
+* **Pre-flight Syntax Checking & Repair:** The merger now detects broken syntax *before* applying hunks, offering an interactive repair flow and a built-in auto-fixer for `TabError` indentation issues.
+* **VSCode History UI Redesign:** Replaced the linear walkthrough with an interactive, filterable numbered file index, making it significantly faster to find and restore local history snapshots.
+
+* **Bulletproof Git Log Parsing:** The changelog generator now utilizes null-byte (`\x00`) delimiters instead of `|||`. This fixes parsing failures on multi-line commit bodies and complex git histories.
+* **Refined AST Grouping:** Simplified the dependency and IPC tagging logic in `hunk_grouper_ast.py` by removing brittle heuristics, leading to more direct and reliable grouping signals.
+* **Smart Amend Options:** Added an interactive "flip direction" (`f` key) to `amend.py` for easily swapping base and head commits if auto-detection misses the mark during merge commit generation.
+* **Cleaner Release Notes:** Improved noise filtering and duplicate detection for auto-generated changelogs.
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/amend.py (43 lines changed)
+- UPDATE: src/gitship/changelog_generator.py (220 lines changed)
+- UPDATE: src/gitship/commit.py (2 lines changed)
+- UPDATE: src/gitship/hunk_grouper_ast.py (84 lines changed)
+- UPDATE: src/gitship/hunk_merger.py (2167 lines changed)
+- UPDATE: src/gitship/vscode_history.py (136 lines changed)
+
+**⚙️ Configuration:**
+- pyproject.toml (2 lines)
+
+**Additional Changes:**
+- Update 1 code files
+- fix: Update 1 code files
+- refactor(changelogs): improve git log parsing robustness with null-byte separators
+- feat: Overhaul hunk merger with semantic region finding and improved UX
+
+_7 files changed, 2115 insertions(+), 539 deletions(-)_
+
 ## [0.7.0] — 2026-03-29
 
 AST Semantic Commits & Hunk Merger
