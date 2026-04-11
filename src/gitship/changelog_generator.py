@@ -44,24 +44,23 @@ def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
 
-    # Use %x00 (null byte) as field separator — safe because git commit messages
-    # cannot contain null bytes. ||| collides with diff stat output in commit bodies.
-    SEP = "\x00"
-    END = "\x00END_COMMIT\x00"
-
+    # %x1F (unit sep) and %x1E (record sep) are written by git into stdout.
+    # They're never passed as argv bytes so no execvp/null-byte issues.
+    # They cannot appear in commit messages in practice.
     log_output = run_git([
         "log", range_str,
-        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
+        "--pretty=format:%H%x1F%s%x1F%B%x1E",
         "--no-merges"
     ], repo_path, debug=True)
 
     commits = []
 
-    for commit_block in log_output.split(END):
-        if not commit_block.strip():
+    for commit_block in log_output.split("\x1e"):
+        commit_block = commit_block.strip()
+        if not commit_block:
             continue
 
-        parts = commit_block.split(SEP, 2)  # Split at most twice: sha, subject, body
+        parts = commit_block.split("\x1f", 2)  # sha, subject, body — maxsplit keeps body intact
         if len(parts) < 2:
             continue
 
@@ -110,25 +109,23 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
 
-    # Use %x00 (null byte) as field separator — safe because git commit messages
-    # cannot contain null bytes. ||| collides with diff stat output in commit bodies.
-    SEP = "\x00"
-    END = "\x00END_COMMIT\x00"
-
+    # %x1F (unit sep) and %x1E (record sep) are written by git into stdout.
+    # They're never passed as argv bytes so no execvp/null-byte issues.
     log_output = run_git([
         "log", range_str,
-        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
+        "--pretty=format:%H%x1F%s%x1F%B%x1E",
         "--no-merges"
     ], repo_path, debug=True)
 
     commits = []
     seen_messages = set()
 
-    for commit_block in log_output.split(END):
-        if not commit_block.strip():
+    for commit_block in log_output.split("\x1e"):
+        commit_block = commit_block.strip()
+        if not commit_block:
             continue
 
-        parts = commit_block.split(SEP, 2)  # Split at most twice: sha, subject, body
+        parts = commit_block.split("\x1f", 2)  # sha, subject, body — maxsplit keeps body intact
         if len(parts) < 2:
             continue
 
@@ -169,15 +166,16 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
     # Also get merge commits (they often have detailed info)
     merge_log = run_git([
         "log", range_str,
-        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
+        "--pretty=format:%H%x1F%s%x1F%B%x1E",
         "--merges"
     ], repo_path, debug=True)
 
-    for commit_block in merge_log.split(END):
-        if not commit_block.strip():
+    for commit_block in merge_log.split("\x1e"):
+        commit_block = commit_block.strip()
+        if not commit_block:
             continue
 
-        parts = commit_block.split(SEP, 2)
+        parts = commit_block.split("\x1f", 2)
         if len(parts) < 2:
             continue
 
