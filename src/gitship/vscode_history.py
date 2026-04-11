@@ -232,9 +232,10 @@ class VSCodeHistory:
 
     def interactive_restore(self, backup: bool = True, dry_run: bool = False):
         """
-        Walk through each file that has VSCode history and offer to restore.
+        Show a numbered index of all files, let the user pick by number,
+        then dive into that file's version list.
 
-        Safety: empty Enter = Skip (never auto-restores).
+        Safety: empty Enter always goes back / skips — never auto-restores.
         """
         if not self._scanned:
             self.scan()
@@ -246,64 +247,94 @@ class VSCodeHistory:
         if dry_run:
             _safe_print("  ℹ️  DRY RUN — nothing will be written.\n")
 
-        print("=" * 60)
-        print("  GITSHIP — VSCode History Restore")
-        print("=" * 60)
-        print(f"  Directory : {self.target_dir}")
-        print(f"  Files found: {len(self.file_versions)}")
-        print()
-
-        # Sort by most recently changed first (latest snapshot timestamp)
+        # Sort by most recently changed first
         sorted_files = sorted(
             self.file_versions.items(),
             key=lambda x: x[1][0]["timestamp"],
             reverse=True,
         )
+
         restored = 0
-        skipped = 0
 
-        # Optional search filter
-        search_term = ""
-        print("  🔍 Filter by filename (Enter to show all): ", end="")
-        try:
-            search_term = input().strip().lower()
-        except KeyboardInterrupt:
+        while True:
+            # ── File index ────────────────────────────────────────────────────
             print()
-            return
-        if search_term:
-            sorted_files = [(r, v) for r, v in sorted_files if search_term in r.lower()]
-            if not sorted_files:
-                _safe_print(f"  ⚠️  No files matching '{search_term}' found.")
-                return
-            _safe_print(f"  ✓ Showing {len(sorted_files)} file(s) matching '{search_term}'\n")
+            print("=" * 60)
+            print("  GITSHIP — VSCode History Restore")
+            print("=" * 60)
+            print(f"  Directory : {self.target_dir}")
+            print(f"  Files: {len(sorted_files)}")
+            print()
 
-        for rel_path, versions in sorted_files:
+            search_term = ""
+            print("  🔍 Filter (Enter to show all): ", end="")
+            try:
+                search_term = input().strip().lower()
+            except KeyboardInterrupt:
+                print(); break
+
+            display = [(r, v) for r, v in sorted_files
+                       if not search_term or search_term in r.lower()]
+            if not display:
+                _safe_print(f"  ⚠️  No files matching '{search_term}'.")
+                continue
+
+            print()
+            print("─" * 60)
+            for i, (rel_path, versions) in enumerate(display, 1):
+                current = self.target_dir / rel_path
+                latest_dt = versions[0]["datetime"].strftime("%Y-%m-%d %H:%M:%S")
+                on_disk = "✓" if current.exists() else "✗"
+                print(f"  [{i:>3}] {on_disk}  {rel_path}")
+                print(f"         {len(versions)} snapshots  · latest {latest_dt}")
+            print("─" * 60)
+            print()
+            print("  Enter file number to inspect, or Q to quit.")
+            print()
+
+            try:
+                raw = input("  File #: ").strip()
+            except KeyboardInterrupt:
+                print(); break
+
+            if raw.upper() == "Q" or raw == "":
+                break
+
+            try:
+                file_idx = int(raw) - 1
+                if not (0 <= file_idx < len(display)):
+                    _safe_print(f"  ⚠️  Enter 1–{len(display)}.")
+                    continue
+            except ValueError:
+                _safe_print("  ⚠️  Enter a number or Q.")
+                continue
+
+            rel_path, versions = display[file_idx]
             current = self.target_dir / rel_path
 
-            print("─" * 60)
-            print(f"  📄 {rel_path}")
-
-            if current.exists():
-                mtime = datetime.fromtimestamp(current.stat().st_mtime)
-                print(f"     Current : {mtime.strftime('%Y-%m-%d %H:%M:%S')} (on disk)")
-            else:
-                print("     Current : ✗ not on disk")
-
-            print(f"     Versions: {len(versions)} unique snapshots in VSCode history")
-            print()
-
-            # Show version list with diff stats
-            for i, ver in enumerate(versions, 1):
-                dt = ver["datetime"].strftime("%Y-%m-%d %H:%M:%S")
-                stat = self._diff_stat(current, ver["source"]) if current.exists() else "—"
-                print(f"     [{i}] {dt}   {stat}")
-
-            print()
-            print("  Options:  [1-N] pick version   [D]iff   [P]review   [S]kip   [Q]uit")
-            print("  ⚠️   Enter alone = Skip (nothing happens)")
-            print()
-
+            # ── Version picker for chosen file ────────────────────────────────
             while True:
+                print()
+                print("─" * 60)
+                print(f"  📄 {rel_path}")
+                if current.exists():
+                    mtime = datetime.fromtimestamp(current.stat().st_mtime)
+                    print(f"     On disk : {mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    print("     On disk : ✗ not present")
+                print(f"     Versions: {len(versions)} snapshots")
+                print()
+
+                for i, ver in enumerate(versions, 1):
+                    dt = ver["datetime"].strftime("%Y-%m-%d %H:%M:%S")
+                    stat = self._diff_stat(current, ver["source"]) if current.exists() else "—"
+                    print(f"     [{i}] {dt}   {stat}")
+
+                print()
+                print("  [1-N] restore version   [D]iff   [P]review   [B]ack   [Q]uit")
+                print("  ⚠️   Enter alone = Back")
+                print()
+
                 try:
                     raw = input("  Choice: ").strip()
                 except KeyboardInterrupt:
@@ -312,13 +343,11 @@ class VSCodeHistory:
 
                 choice = raw.upper()
 
-                if choice in ("", "S"):
-                    _safe_print("  ↷ Skipped\n")
-                    skipped += 1
-                    break
+                if choice in ("", "B"):
+                    break  # back to file index
 
                 elif choice == "Q":
-                    _safe_print(f"\n  Done. Restored {restored}, skipped {skipped}.")
+                    _safe_print(f"\n  Done. Restored {restored} file(s).")
                     return
 
                 elif choice == "D":
@@ -347,29 +376,28 @@ class VSCodeHistory:
                     continue
 
                 else:
-                    # Numeric version pick
                     try:
                         idx = int(choice) - 1
                         if not (0 <= idx < len(versions)):
                             _safe_print(f"  ⚠️  Enter 1–{len(versions)}.")
                             continue
                     except ValueError:
-                        _safe_print("  ⚠️  Unknown option. Enter a number, D, P, S, or Q.")
+                        _safe_print("  ⚠️  Unknown option.")
                         continue
 
                     ver = versions[idx]
                     dt = ver["datetime"].strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"\n  Restore version from {dt}?")
+                    print(f"\n  Restore {rel_path} from {dt}?")
                     confirm = input("  Type 'y' to confirm, anything else to cancel: ").strip().lower()
                     if confirm == "y":
                         if self.restore(rel_path, ver, backup=backup, dry_run=dry_run):
                             restored += 1
+                        break  # back to file index after restore
                     else:
                         _safe_print("  ↷ Cancelled\n")
-                    break
+                    continue
 
-        print("─" * 60)
-        _safe_print(f"\n  ✓ Done. Restored {restored} file(s), skipped {skipped}.")
+        _safe_print(f"\n  ✓ Done. Restored {restored} file(s).")
 
 
 # ── init.py integration helper ─────────────────────────────────────────────────

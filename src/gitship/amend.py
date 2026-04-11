@@ -134,22 +134,39 @@ def amend_with_smart_message(repo_path: Path):
         
         # Generate detailed message using parent commits
         try:
-            # Use parent[1] as base (target before merge) and parent[0] as head (source merged in)
-            detailed_message = generate_merge_message(repo_path, parents[1], parents[0])
+            # parents[0] = branch merged INTO (main), parents[1] = branch merged FROM (development)
+            # base=parents[0], head=parents[1] means: what did development add on top of main?
+            base, head = parents[0], parents[1]
             
-            # If we detected branch names, update the title
-            if source and target:
-                lines = detailed_message.split('\n')
-                lines[0] = f"Merge {source} → {target}"
-                detailed_message = '\n'.join(lines)
+            print(f"\n🔍 Debug: parents[0]={parents[0][:7]} (main/target), parents[1]={parents[1][:7]} (source/development)")
+            print(f"   Calling generate_merge_message(base={base[:7]}, head={head[:7]})")
+
+            def _build_message(b, h):
+                msg = generate_merge_message(repo_path, b, h)
+                if source and target:
+                    lines = msg.split('\n')
+                    lines[0] = f"Merge {source} → {target}"
+                    msg = '\n'.join(lines)
+                return msg
+
+            detailed_message = _build_message(base, head)
             
-            print("\n" + "="*70)
-            print("PROPOSED DETAILED MESSAGE:")
-            print("="*70)
-            print(detailed_message)
-            print("="*70)
+            while True:
+                print("\n" + "="*70)
+                print("PROPOSED DETAILED MESSAGE:")
+                print("="*70)
+                print(detailed_message)
+                print("="*70)
+                print(f"\n   (Direction: base={base[:7]} → head={head[:7]})")
             
-            choice = input("\nUse this message? (y/n/e to edit in editor): ").strip().lower()
+                choice = input("\nUse this message? (y/n/e to edit / F to flip direction): ").strip().lower()
+                
+                if choice == 'f':
+                    base, head = head, base
+                    print(f"\n🔄 Flipped! Regenerating with base={base[:7]} → head={head[:7]}...")
+                    detailed_message = _build_message(base, head)
+                    continue
+                break
             
             if choice == 'y':
                 result = run_git(["commit", "--amend", "-m", detailed_message], cwd=repo_path, check=False)

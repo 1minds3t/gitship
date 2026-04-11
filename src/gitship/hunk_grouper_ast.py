@@ -18,7 +18,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,6 @@ class Hunk:
     removed: list[str] = field(default_factory=list)
     added:   list[str] = field(default_factory=list)
     context: list[str] = field(default_factory=list)
-    raw_lines: list[str] = field(default_factory=list)  # ADD THIS
 
     def removes(self, pattern: str) -> bool:
         return any(re.search(pattern, l) for l in self.removed)
@@ -78,16 +77,14 @@ class Hunk:
 # Diff parser
 # ---------------------------------------------------------------------------
 
-def parse_diff(path) -> list[Hunk]:
+def parse_diff(path: Union[Path, str]) -> list[Hunk]:
     hunks: list[Hunk] = []
     cur_file = ""
     cur_hunk: Optional[Hunk] = None
     hunk_id = 0
-    if isinstance(path, str):
-        raw_lines = path.splitlines()
-    else:
-        raw_lines = path.read_text(errors="replace").splitlines()
-    for raw in raw_lines:
+
+    lines = path.read_text(errors="replace").splitlines() if isinstance(path, Path) else path.splitlines()
+    for raw in lines:
         if raw.startswith("+++ b/"):
             cur_file = raw[6:].strip()
             cur_hunk = None
@@ -96,20 +93,15 @@ def parse_diff(path) -> list[Hunk]:
             hunks.append(cur_hunk)
             hunk_id += 1
         elif cur_hunk is not None:
-            if raw.startswith("diff --git "):
-                cur_hunk = None
-                continue
             if raw.startswith("---") or raw.startswith("+++"):
                 continue
             elif raw.startswith("-"):
                 cur_hunk.removed.append(raw[1:])
-                cur_hunk.raw_lines.append(raw)
             elif raw.startswith("+"):
                 cur_hunk.added.append(raw[1:])
-                cur_hunk.raw_lines.append(raw)
             else:
-                cur_hunk.context.append(raw[1:] if raw.startswith(" ") else raw)
-                cur_hunk.raw_lines.append(raw if raw.startswith(" ") else f" {raw}")
+                cur_hunk.context.append(raw.lstrip(" "))
+
     return hunks
 
 
@@ -171,29 +163,10 @@ def _excepts(tree: ast.Module) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _tag_dependency(hunk: Hunk) -> set[GroupTag]:
-    if not hunk.removed and len(hunk.added) > 80:
-        return set()  # new/large file — skip to avoid false positives
     """Group A: import-driven dependency migration (e.g. fs_lock_queue).
     Only tags project-internal modules — stdlib and common third-party are filtered.
-
-    Key insight: an import is only the *primary signal* if the hunk is
-    substantially about that import.  A 111-line hunk that incidentally
-    contains one `from omnipkg.common_utils import ProcessCorruptedException`
-    deep in a try/except is NOT a common_utils migration hunk — it's a
-    nesting/daemon hunk that happens to reference that symbol.
-
-    Rules:
-      1. Count how many added lines are imports vs. substantive code.
-      2. If the hunk has >= LARGE_HUNK_THRESHOLD added lines AND the import
-         accounts for <= IMPORT_DENSITY_THRESHOLD of them, treat it as
-         incidental and skip the dependency tag for that module.
-      3. Exception: explicit migration helpers (safe_cloak, fs_lock_queue)
-         are always tagged regardless of hunk size — those are unambiguous.
     """
     tags: set[GroupTag] = set()
-
-    LARGE_HUNK_THRESHOLD   = 20   # lines added — below this, any import dominates
-    IMPORT_DENSITY_THRESHOLD = 0.15  # import lines / total added lines
 
     # Stdlib and common third-party modules — importing these is not a migration signal
     STDLIB_MODULES = {
@@ -212,31 +185,12 @@ def _tag_dependency(hunk: Hunk) -> set[GroupTag]:
     if added_tree is None:
         return tags
 
-    n_added = len(hunk.added)
-    is_large = n_added >= LARGE_HUNK_THRESHOLD
-
-    # Count import lines in this hunk
-    import_lines = [l for l in hunk.added
-                    if re.match(r'\s*(import |from \S+ import )', l)]
-    import_density = len(import_lines) / n_added if n_added > 0 else 0
-
     for node in ast.walk(added_tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             mod = node.module.split(".")[-1]
-            if mod in STDLIB_MODULES:
-                continue
+            if mod not in STDLIB_MODULES:
+                tags.add(GroupTag("dependency", mod))
 
-            # For large hunks where imports are a tiny fraction of the code,
-            # this is an incidental import — the hunk's PRIMARY purpose is
-            # something else (e.g. daemon path logic, nesting, ABI handling).
-            # Don't let one incidental import hijack the group label.
-            if is_large and import_density < IMPORT_DENSITY_THRESHOLD:
-                continue  # incidental — skip dependency tag
-
-            tags.add(GroupTag("dependency", mod))
-
-    # Explicit migration helpers are always tagged — these are unambiguous
-    # signals of a specific API migration regardless of hunk size.
     migration_names = {"safe_cloak", "safe_uncloak", "fs_lock_queue"}
     added_calls = _calls(added_tree)
     for name in migration_names:
@@ -247,8 +201,6 @@ def _tag_dependency(hunk: Hunk) -> set[GroupTag]:
 
 
 def _tag_ipc(hunk: Hunk) -> set[GroupTag]:
-    if not hunk.removed and len(hunk.added) > 80:
-        return set()  # new/large file — string literals are not IPC types
     """
     Group B: cross-language IPC message types.
     word_word pattern is unambiguous in both Python strings and C strings.
@@ -271,21 +223,11 @@ def _tag_ipc(hunk: Hunk) -> set[GroupTag]:
             # but keep legitimate IPC types like patch_site_packages_cache
             if candidate.startswith("_"):
                 continue
-            # Reject module name args to importlib and filename strings
-            if 'spec_from_file_location' in line and candidate in line:
-                continue
-            if (candidate + '.py') in line:
-                continue
-            # Reject dict keys — "word_word": value patterns are not IPC types
-            if re.search(r'["\']'  + re.escape(candidate) + r'["\']\s*:', line):
-                continue
             tags.add(GroupTag("ipc", candidate))
     return tags
 
 
 def _tag_symbol_removed(hunk: Hunk) -> set[GroupTag]:
-    if not hunk.removed:
-        return set()  # new file — no removals, skip to avoid string literal false positives
     """
     Group C: identifier purely removed (not renamed).
     AST-based: compares Name nodes in removed vs added lines.
@@ -337,7 +279,7 @@ def _tag_symbol_removed(hunk: Hunk) -> set[GroupTag]:
         "NotImplementedError", "StopIteration", "GeneratorExit",
         "ArithmeticError", "ZeroDivisionError", "OverflowError",
         "MemoryError", "RecursionError", "SystemError", "SystemExit",
-        "KeyboardInterrupt", "UnicodeError", "TimeoutError", "EOFError",
+        "KeyboardInterrupt", "UnicodeError", "TimeoutError",
         "ConnectionError", "BrokenPipeError", "AssertionError",
         # Common stdlib modules imported/removed
         "shutil", "os", "sys", "time", "re", "json", "io", "abc",
@@ -366,8 +308,6 @@ def _tag_symbol_removed(hunk: Hunk) -> set[GroupTag]:
 
 
 def _tag_exception_contract(hunk: Hunk) -> set[GroupTag]:
-    if not hunk.removed and len(hunk.added) > 80:
-        return set()  # new/large file — skip to avoid comment/string false positives
     """Group D: exception raised in one hunk, caught in another.
     Only tags *custom* exceptions — stdlib built-ins are filtered out.
     """
@@ -383,7 +323,7 @@ def _tag_exception_contract(hunk: Hunk) -> set[GroupTag]:
         "NotImplementedError", "StopIteration", "GeneratorExit",
         "ArithmeticError", "ZeroDivisionError", "OverflowError",
         "MemoryError", "RecursionError", "SystemError", "SystemExit",
-        "KeyboardInterrupt", "UnicodeError", "UnicodeDecodeError", "EOFError",
+        "KeyboardInterrupt", "UnicodeError", "UnicodeDecodeError",
         "UnicodeEncodeError", "TimeoutError", "ConnectionError",
         "BrokenPipeError", "AssertionError", "LookupError",
         "EnvironmentError", "ProcessLookupError", "ChildProcessError",
@@ -432,8 +372,6 @@ def _tag_abstraction(hunk: Hunk) -> set[GroupTag]:
 
 
 def _tag_callgraph(hunk: Hunk, definer_map: dict[str, int]) -> set[GroupTag]:
-    if not hunk.removed and len(hunk.added) > 80:
-        return set()  # new/large file — all defs are new, callgraph is meaningless
     """Finds same-file define->call relationships with surgical precision."""
     tags: set[GroupTag] = set()
     

@@ -2568,7 +2568,7 @@ def semantic_commit(analyzer: ChangeAnalyzer) -> bool:
     for _line in _status_res.stdout.splitlines():
         if not _line.startswith("?? "):
             continue
-        _fpath = _line[3:].strip()
+        _fpath = _line[3:].strip().strip('"')
         _abs = repo_path / _fpath
         if not _abs.is_file():
             continue
