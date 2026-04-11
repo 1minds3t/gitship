@@ -15,7 +15,7 @@ import re
 # Marker to identify commits made by gitship commit tool
 GITSHIP_COMMIT_MARKER = "[gitship-generated]"
 
-def run_git(args: List[str], cwd: Path, check: bool = False) -> str:
+def run_git(args: List[str], cwd: Path, check: bool = False, debug: bool = False) -> str:
     """Run a git command and return output."""
     try:
         result = subprocess.run(
@@ -25,8 +25,14 @@ def run_git(args: List[str], cwd: Path, check: bool = False) -> str:
             text=True,
             check=check
         )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except:
+        if result.returncode != 0:
+            if debug:
+                print(f"[DEBUG] git {' '.join(args)} exited {result.returncode}: {result.stderr.strip()}")
+            return ""
+        return result.stdout.strip()
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] git {' '.join(args)} raised: {e}")
         return ""
 
 def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
@@ -37,39 +43,47 @@ def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
     Use this for merge message generation where you want to show "Update X (×4)".
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
-    
+
+    # Use %x00 (null byte) as field separator — safe because git commit messages
+    # cannot contain null bytes. ||| collides with diff stat output in commit bodies.
+    SEP = "\x00"
+    END = "\x00END_COMMIT\x00"
+
     log_output = run_git([
-        "log", range_str, 
-        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
+        "log", range_str,
+        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
         "--no-merges"
-    ], repo_path)
-    
+    ], repo_path, debug=True)
+
     commits = []
-    
-    for commit_block in log_output.split('|||END_COMMIT'):
+
+    for commit_block in log_output.split(END):
         if not commit_block.strip():
             continue
-            
-        parts = commit_block.split('|||')
-        if len(parts) < 3:
+
+        parts = commit_block.split(SEP, 2)  # Split at most twice: sha, subject, body
+        if len(parts) < 2:
             continue
-            
+
         sha = parts[0].strip()
         subject = parts[1].strip()
         full_message = parts[2].strip() if len(parts) > 2 else ""
-        
+
+        if not sha or len(sha) < 7:
+            continue
+
         body_parts = full_message.split('\n', 1)
         body = body_parts[1].strip() if len(body_parts) > 1 else ""
-        
+
         # Skip noise but DON'T skip duplicates
         if any(phrase in subject.lower() for phrase in [
             "merge", "auto-merge", "sync main", "sync development",
             "chore: release", "preparing release"
         ]):
             continue
-        
+
         is_gitship = GITSHIP_COMMIT_MARKER in body or GITSHIP_COMMIT_MARKER in full_message
-        
+
         commits.append({
             'sha': sha,
             'subject': subject,
@@ -78,7 +92,7 @@ def get_all_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]:
             'is_gitship': is_gitship,
             'is_merge': False
         })
-    
+
     return commits
 
 def is_gitship_commit(commit_sha: str, repo_path: Path) -> bool:
@@ -95,50 +109,54 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
     Prioritizes merge commits and gitship-generated commits as they tend to be more detailed.
     """
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
-    
-    # Get commit SHAs and subjects - use %B for full message
+
+    # Use %x00 (null byte) as field separator — safe because git commit messages
+    # cannot contain null bytes. ||| collides with diff stat output in commit bodies.
+    SEP = "\x00"
+    END = "\x00END_COMMIT\x00"
+
     log_output = run_git([
-        "log", range_str, 
-        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
-        "--no-merges"  # We'll handle merges separately
-    ], repo_path)
-    
+        "log", range_str,
+        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
+        "--no-merges"
+    ], repo_path, debug=True)
+
     commits = []
     seen_messages = set()
-    
-    # Split by END_COMMIT marker to handle multi-line bodies
-    for commit_block in log_output.split('|||END_COMMIT'):
+
+    for commit_block in log_output.split(END):
         if not commit_block.strip():
             continue
-            
-        parts = commit_block.split('|||')
-        if len(parts) < 3:
+
+        parts = commit_block.split(SEP, 2)  # Split at most twice: sha, subject, body
+        if len(parts) < 2:
             continue
-            
+
         sha = parts[0].strip()
         subject = parts[1].strip()
         full_message = parts[2].strip() if len(parts) > 2 else ""
-        
-        # Body is everything after the subject line in the full message
-        # The full message (%B) includes subject + blank line + body
+
+        if not sha or len(sha) < 7:
+            continue
+
         body_parts = full_message.split('\n', 1)
         body = body_parts[1].strip() if len(body_parts) > 1 else ""
-        
+
         # Skip noise
         if any(phrase in subject.lower() for phrase in [
             "merge", "auto-merge", "sync main", "sync development",
             "chore: release", "preparing release"
         ]):
             continue
-        
+
         # Skip duplicates
         if subject in seen_messages:
             continue
         seen_messages.add(subject)
-        
+
         # Check if gitship-generated
         is_gitship = GITSHIP_COMMIT_MARKER in body or GITSHIP_COMMIT_MARKER in full_message
-        
+
         commits.append({
             'sha': sha,
             'subject': subject,
@@ -147,32 +165,33 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
             'is_gitship': is_gitship,
             'is_merge': False
         })
-    
+
     # Also get merge commits (they often have detailed info)
     merge_log = run_git([
         "log", range_str,
-        "--pretty=format:%H|||%s|||%B|||END_COMMIT",
+        f"--pretty=format:%H{SEP}%s{SEP}%B{END}",
         "--merges"
-    ], repo_path)
-    
-    for commit_block in merge_log.split('|||END_COMMIT'):
+    ], repo_path, debug=True)
+
+    for commit_block in merge_log.split(END):
         if not commit_block.strip():
             continue
-            
-        parts = commit_block.split('|||')
-        if len(parts) < 3:
+
+        parts = commit_block.split(SEP, 2)
+        if len(parts) < 2:
             continue
-            
+
         sha = parts[0].strip()
         subject = parts[1].strip()
         full_message = parts[2].strip() if len(parts) > 2 else ""
-        
+
+        if not sha or len(sha) < 7:
+            continue
+
         body_parts = full_message.split('\n', 1)
         body = body_parts[1].strip() if len(body_parts) > 1 else ""
-        
-        # Extract useful info from merge commits
+
         if "Merge pull request" in subject or "Merge branch" in subject:
-            # Get the actual content from the merge body
             if body and not any(phrase in body.lower() for phrase in ["conflict", "auto-merge"]):
                 commits.append({
                     'sha': sha,
@@ -182,7 +201,7 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
                     'is_gitship': False,
                     'is_merge': True
                 })
-    
+
     return commits
 
 
@@ -281,13 +300,13 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     4. Groups changes intelligently
     """
     commits = get_detailed_commits_since_tag(repo_path, last_tag)
-    
+
     # DEBUG: Show what commits we found
     print(f"[DEBUG] Found {len(commits)} commits since {last_tag}")
-    
+
     # Get file statistics
     range_str = f"{last_tag}..HEAD" if last_tag else "HEAD"
-    stats = run_git(["diff", "--shortstat", range_str], repo_path)
+    stats = run_git(["diff", "--shortstat", range_str], repo_path, debug=True)
     
     changelog_lines = []
     suggested_title = ""
