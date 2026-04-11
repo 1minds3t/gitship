@@ -378,45 +378,33 @@ def generate_detailed_changelog(repo_path: Path, last_tag: str, new_version: str
     except:
         pass
     
-    # Generate smart title based on ALL changes
-    all_files = set()
-    for f in all_new_files:
-        fname = f.split('(')[0].strip()
-        all_files.add(fname)
-    for f in all_modified_files:
-        fname = f.split('(')[0].strip()
-        all_files.add(fname)
-    
-    # Extract key module names
-    key_modules = set()
-    for filepath in all_files:
-        parts = filepath.replace('.py', '').split('/')
-        if parts:
-            module = parts[-1]
-            if module and module not in ['test', 'tests', '__init__', '__pycache__']:
-                key_modules.add(module)
-    
-    key_files = sorted(list(key_modules))[:3]
-    
-    # Generate title
-    if len(key_files) == 1:
-        if all_new_files and all_modified_files:
-            suggested_title = f"Add {key_files[0]} and improvements"
-        elif all_new_files:
-            suggested_title = f"Add {key_files[0]}"
-        else:
-            suggested_title = f"Fix {key_files[0]}"
-    elif len(key_files) == 2:
-        if all_new_files and all_modified_files:
-            suggested_title = f"Add {key_files[0]}, fix {key_files[1]}"
-        else:
-            suggested_title = f"Fix {key_files[0]} and {key_files[1]}"
-    elif len(key_files) >= 3:
-        suggested_title = f"Fix {key_files[0]}, {key_files[1]}, and {key_files[2]}"
+    # Generate title from the LARGEST commit by LOC — that's the one that matters.
+    def _commit_loc(commit: Dict) -> int:
+        """Sum +/- lines from a gitship commit body like: • src/foo.py (+1878/-301 lines)"""
+        total = 0
+        for line in commit['body'].split('\n'):
+            m = re.search(r'\(\+(\d+)/-?(\d+)', line)
+            if m:
+                total += int(m.group(1)) + int(m.group(2))
+        return total
+
+    def _strip_conventional_prefix(subject: str) -> str:
+        """Strip feat:, fix:, refactor(scope):, chore!: etc."""
+        m = re.match(r'^[a-z]+(?:\([^)]+\))?!?:\s*', subject)
+        return subject[m.end():].strip() if m else subject.strip()
+
+    all_scored = sorted([(_commit_loc(c), c) for c in commits], key=lambda x: x[0], reverse=True)
+
+    print(f"[DEBUG] Commit scoring ({len(all_scored)} total):")
+    for loc, c in all_scored:
+        print(f"[DEBUG]   LOC={loc:5d}  is_gitship={c['is_gitship']}  sha={c['sha'][:8]}  subject={c['subject'][:80]}")
+
+    if all_scored:
+        _, heaviest = all_scored[0]
+        suggested_title = _strip_conventional_prefix(heaviest['subject'])
+        print(f"[DEBUG] Picked title from: {heaviest['sha'][:8]} ({heaviest['subject'][:80]})")
     else:
-        suggested_title = commit_subjects[0] if commit_subjects else f"Release {new_version}"
-        if ':' in suggested_title:
-            suggested_title = suggested_title.split(':', 1)[1].strip()
+        suggested_title = f"Release {new_version}"
     
     # Build comprehensive changelog with ALL changes
     changelog_lines = []
