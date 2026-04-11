@@ -144,16 +144,19 @@ def get_detailed_commits_since_tag(repo_path: Path, last_tag: str) -> List[Dict]
             "merge", "auto-merge", "sync main", "sync development",
             "chore: release", "preparing release"
         ]):
+            print(f"[DEBUG] SKIP noise: {sha[:8]} {subject[:60]}")
             continue
 
         # Skip duplicates
         if subject in seen_messages:
+            print(f"[DEBUG] SKIP dedup: {sha[:8]} {subject[:60]}")
             continue
         seen_messages.add(subject)
 
         # Check if gitship-generated
         is_gitship = GITSHIP_COMMIT_MARKER in body or GITSHIP_COMMIT_MARKER in full_message
 
+        print(f"[DEBUG] ACCEPT: {sha[:8]} is_gitship={is_gitship} body_len={len(body)} subject={subject[:60]}")
         commits.append({
             'sha': sha,
             'subject': subject,
