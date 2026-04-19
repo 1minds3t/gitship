@@ -97,7 +97,8 @@ def get_project_toml_path(repo_path: Path) -> Path:
             except ImportError:
                 return repo_path / "pyproject.toml"
 
-        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python',
+                     '_vendor', 'vendor', 'vendored', '.tox', 'venv', '.venv', 'site-packages'}
         for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
             rel = candidate.relative_to(repo_path)
             if len(rel.parts) > 6:
@@ -125,7 +126,25 @@ def get_pypi_latest_version(repo_path: Path) -> Optional[str]:
         
         if not package_name:
             return None
-        
+
+        # Sanity-check: the resolved name must match the root pyproject.toml's
+        # [project] name.  If they differ, a vendored/submodule pyproject.toml
+        # was picked up instead (e.g. _vendor/uv).  Fall back to the root name.
+        root_toml = repo_path / "pyproject.toml"
+        if root_toml.exists():
+            try:
+                try:
+                    import tomllib as _tl
+                except ImportError:
+                    import tomli as _tl  # type: ignore
+                with open(root_toml, "rb") as _f:
+                    _root_data = _tl.load(_f)
+                _root_name = _root_data.get("project", {}).get("name", "")
+                if _root_name and package_name != _root_name:
+                    package_name = _root_name
+            except Exception:
+                pass
+
         import requests
         resp = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
         

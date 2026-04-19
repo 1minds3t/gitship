@@ -80,7 +80,8 @@ def read_package_name(repo_path: Path) -> Optional[str]:
             pass
 
         # Scan for all pyproject.toml files with [tool.maturin]
-        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python',
+                     '_vendor', 'vendor', 'vendored', '.tox', 'venv', '.venv', 'site-packages'}
         maturin_hits = []  # list of (rel_path_str, package_name)
         for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
             rel = candidate.relative_to(repo_path)
@@ -706,7 +707,8 @@ def update_pypi_description(repo_path: Path, package_name: str):
     # Find the relevant pyproject.toml (maturin crate or root)
     pyproject_path = None
     if tomllib is not None:
-        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python'}
+        SKIP_DIRS = {'target', 'node_modules', '__pycache__', 'test', 'scripts', 'docs', 'python',
+                     '_vendor', 'vendor', 'vendored', '.tox', 'venv', '.venv', 'site-packages'}
         for candidate in sorted(repo_path.rglob("pyproject.toml"), key=lambda p: len(p.parts)):
             rel = candidate.relative_to(repo_path)
             parts = rel.parts
