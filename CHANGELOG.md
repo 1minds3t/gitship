@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-04-18
+
+Smart PyProject Discovery & Vendoring Isolation
+
+## 🚀 Robust Dependency Discovery
+
+This patch improves how gitship identifies the primary project in complex repositories, specifically those using vendored dependencies or nested environments.
+
+- **Vendoring Isolation:** Automatically ignores `_vendor/`, `vendor/`, and `vendored/` directories to prevent picking up third-party `pyproject.toml` files.
+- **Environment Awareness:** Now skips `.venv`, `venv`, `.tox`, and `site-packages` during package discovery.
+- **Identity Fail-safe:** Implemented a root-level name validation check to ensure the latest version is always fetched for the actual project, not a nested dependency.
+
+_This fix ensures gitship remains reliable even when packaging tools that contain other packaging tools._
+
+---
+
+**📝 Code Changes:**
+- UPDATE: src/gitship/pypi.py (6 lines changed)
+- UPDATE: src/gitship/release.py (23 lines changed)
+
+_2 files changed, 25 insertions(+), 4 deletions(-)_
+
 ## [0.8.0] — 2026-04-11
 
 Overhaul hunk merger with semantic region finding and improved UX
